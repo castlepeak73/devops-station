@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Northstar Ops - 运维检测台</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Noto+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="brand"><span class="brand-mark">N</span><span>Northstar <b>OPS</b></span></div>
+      <nav class="nav" aria-label="主导航">
+        <button class="nav-item active" data-view="dashboard"><span class="nav-icon">⌘</span>总览</button>
+        <button class="nav-item" data-view="assets"><span class="nav-icon">▣</span>资产管理 <i>24</i></button>
+        <button class="nav-item" data-view="checks"><span class="nav-icon">◉</span>巡检中心</button>
+        <button class="nav-item" data-view="alerts"><span class="nav-icon">△</span>告警中心 <i class="danger">3</i></button>
+        <button class="nav-item" data-view="audit"><span class="nav-icon">≡</span>审计日志</button>
+      </nav>
+      <div class="sidebar-footer">
+        <div class="environment"><span></span><div><small>当前环境</small><strong>生产环境</strong></div><b>⌄</b></div>
+        <div class="user"><div class="avatar">CY</div><div><strong>陈宇</strong><small>平台运维工程师</small></div><button title="设置">⚙</button></div>
+      </div>
+    </aside>
+    <main class="app-shell">
+      <header class="topbar">
+        <div class="crumb"><span id="page-kicker">控制台</span><h1 id="page-title">运行总览</h1></div>
+        <div class="top-actions"><span class="clock" id="clock"></span><button class="icon-button" title="通知">♧<em></em></button><button class="help-button">?</button></div>
+      </header>
+
+      <section class="view active" id="dashboard">
+        <div class="overview-row"><div><p class="lede">上午好，陈宇。生产环境整体运行平稳。</p><p class="subtle">数据更新于 <span id="updated-at">刚刚</span></p></div><button class="primary" id="run-all">▶ 运行全量巡检</button></div>
+        <div class="metrics">
+          <article class="metric"><div class="metric-label">受管资产 <span class="metric-icon blue">▣</span></div><strong>24</strong><p><span class="up">↑ 2</span> 较上周</p></article>
+          <article class="metric"><div class="metric-label">健康资产 <span class="metric-icon green">●</span></div><strong>21 <small>/ 24</small></strong><p><span class="up">87.5%</span> 健康率</p></article>
+          <article class="metric"><div class="metric-label">活跃告警 <span class="metric-icon red">△</span></div><strong id="alert-count">3</strong><p><span class="down">↑ 1</span> 较昨日</p></article>
+          <article class="metric"><div class="metric-label">今日巡检 <span class="metric-icon purple">◉</span></div><strong>142 <small>次</small></strong><p><span class="up">98.6%</span> 成功率</p></article>
+        </div>
+        <div class="dashboard-grid">
+          <section class="panel health-panel"><div class="panel-head"><div><h2>服务健康趋势</h2><p>过去 24 小时</p></div><div class="legend"><span><i class="dot blue"></i>可用率</span><span><i class="dot mint"></i>响应时间</span></div></div><div class="chart-wrap"><div class="axis y"><span>100%</span><span>99%</span><span>98%</span><span>97%</span></div><svg viewBox="0 0 720 220" role="img" aria-label="服务健康趋势图"><defs><linearGradient id="area" x1="0" x2="0" y1="0" y2="1"><stop stop-color="#5b7cfa" stop-opacity=".2"/><stop offset="1" stop-color="#5b7cfa" stop-opacity="0"/></linearGradient></defs><g class="gridlines"><path d="M0 15H720M0 80H720M0 145H720M0 210H720"/></g><path class="area" d="M0,55 L58,51 L116,58 L174,48 L232,54 L290,42 L348,48 L406,34 L464,40 L522,30 L580,36 L638,25 L720,31 L720,220 L0,220 Z"/><path class="line availability" d="M0,55 L58,51 L116,58 L174,48 L232,54 L290,42 L348,48 L406,34 L464,40 L522,30 L580,36 L638,25 L720,31"/><path class="line latency" d="M0,170 L58,164 L116,173 L174,150 L232,156 L290,139 L348,150 L406,132 L464,145 L522,118 L580,126 L638,112 L720,120"/></svg><div class="axis x"><span>00:00</span><span>04:00</span><span>08:00</span><span>12:00</span><span>16:00</span><span>20:00</span><span>现在</span></div></div></section>
+          <section class="panel alert-panel"><div class="panel-head"><div><h2>待处理告警</h2><p>需要你的关注</p></div><button class="text-button" data-go="alerts">查看全部 →</button></div><div id="dashboard-alerts"></div></section>
+          <section class="panel services"><div class="panel-head"><div><h2>核心服务状态</h2><p>实时探测结果</p></div><button class="text-button" data-go="assets">资产详情 →</button></div><div class="service-list" id="service-list"></div></section>
+          <section class="panel recent"><div class="panel-head"><div><h2>最近巡检</h2><p>系统自动执行</p></div><button class="text-button" data-go="checks">巡检中心 →</button></div><div id="recent-checks"></div></section>
+        </div>
+      </section>
+
+      <section class="view" id="assets"><div class="view-heading"><div><h2>资产管理</h2><p>统一管理公司基础设施与服务节点</p></div><button class="primary" id="add-asset">＋ 添加资产</button></div><div class="table-controls"><label class="search">⌕<input id="asset-search" placeholder="搜索名称、IP 或负责人" /></label><button class="filter">环境：全部⌄</button><button class="filter">状态：全部⌄</button></div><section class="panel table-panel"><table><thead><tr><th>资产名称</th><th>IP 地址</th><th>环境</th><th>类型</th><th>负责人</th><th>状态</th><th>最后巡检</th><th></th></tr></thead><tbody id="asset-body"></tbody></table></section></section>
+      <section class="view" id="checks"><div class="view-heading"><div><h2>巡检中心</h2><p>执行标准化检测任务并追踪执行结果</p></div><button class="primary" id="new-check">＋ 新建巡检任务</button></div><div class="check-layout"><section class="panel check-panel"><div class="panel-head"><div><h2>预设巡检任务</h2><p>选择任务后立即执行</p></div></div><div id="check-cards"></div></section><section class="panel execution"><div class="panel-head"><div><h2>执行记录</h2><p>最近任务运行状态</p></div></div><div id="execution-list"></div></section></div></section>
+      <section class="view" id="alerts"><div class="view-heading"><div><h2>告警中心</h2><p>共 <span id="all-alert-count">3</span> 条待处理事件</p></div><button class="filter">筛选告警 ⌄</button></div><section class="panel alerts-full"><div id="alert-list"></div></section></section>
+      <section class="view" id="audit"><div class="view-heading"><div><h2>审计日志</h2><p>记录平台中的关键操作与变更</p></div><button class="filter">导出日志 ↓</button></div><section class="panel audit-list" id="audit-list"></section></section>
+    </main>
+    <div class="toast" id="toast"></div>
+    <div class="modal-backdrop" id="asset-modal"><div class="modal"><button class="close" data-close="asset-modal">×</button><h2>添加资产</h2><p>将新基础设施纳入健康监测。</p><label>资产名称<input placeholder="例如：api-gateway-03" /></label><label>IP 地址<input placeholder="例如：10.20.1.28" /></label><label>所属环境<select><option>生产环境</option><option>测试环境</option></select></label><button class="primary full" data-close="asset-modal" id="save-asset">保存资产</button></div></div>
+    <script src="./app.js"></script>
+  </body>
+</html>
