@@ -1,0 +1,4 @@
+node_modules/
+devops-station.db
+devops-station.db-shm
+devops-station.db-wal

@@ -1,0 +1,13 @@
+{
+  "name": "devops-station",
+  "version": "1.0.0",
+  "private": true,
+  "description": "本地运行的运维检测台",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.7.0"
+  }
+}
