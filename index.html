@@ -21,13 +21,13 @@
       </nav>
       <div class="sidebar-footer">
         <div class="environment"><span></span><div><small>当前环境</small><strong>生产环境</strong></div><b>⌄</b></div>
-        <div class="user"><div class="avatar">CY</div><div><strong>青山</strong><small>平台运维工程师</small></div><button title="设置">⚙</button></div>
+        <div class="user"><div class="avatar">CY</div><div><strong>青山</strong><small>平台运维工程师</small></div><button id="settings" title="设置">⚙</button></div>
       </div>
     </aside>
     <main class="app-shell">
       <header class="topbar">
         <div class="crumb"><span id="page-kicker">控制台</span><h1 id="page-title">运行总览</h1></div>
-        <div class="top-actions"><span class="clock" id="clock"></span><button class="icon-button" title="通知">♧<em></em></button><button class="help-button">?</button></div>
+        <div class="top-actions"><span class="clock" id="clock"></span><button class="icon-button" id="notifications" title="通知">♧<em></em></button><button class="help-button" id="help" title="帮助">?</button></div>
       </header>
 
       <section class="view active" id="dashboard">
@@ -46,13 +46,14 @@
         </div>
       </section>
 
-      <section class="view" id="assets"><div class="view-heading"><div><h2>资产管理</h2><p>统一管理公司基础设施与服务节点</p></div><button class="primary" id="add-asset">＋ 添加资产</button></div><div class="table-controls"><label class="search">⌕<input id="asset-search" placeholder="搜索名称、IP 或负责人" /></label><button class="filter">环境：全部⌄</button><button class="filter">状态：全部⌄</button></div><section class="panel table-panel"><table><thead><tr><th>资产名称</th><th>IP 地址</th><th>环境</th><th>类型</th><th>负责人</th><th>状态</th><th>最后巡检</th><th></th></tr></thead><tbody id="asset-body"></tbody></table></section></section>
-      <section class="view" id="checks"><div class="view-heading"><div><h2>巡检中心</h2><p>执行标准化检测任务并追踪执行结果</p></div><button class="primary" id="new-check">＋ 新建巡检任务</button></div><div class="check-layout"><section class="panel check-panel"><div class="panel-head"><div><h2>预设巡检任务</h2><p>选择任务后立即执行</p></div></div><div id="check-cards"></div></section><section class="panel execution"><div class="panel-head"><div><h2>执行记录</h2><p>最近任务运行状态</p></div></div><div id="execution-list"></div></section></div></section>
-      <section class="view" id="alerts"><div class="view-heading"><div><h2>告警中心</h2><p>共 <span id="all-alert-count">3</span> 条待处理事件</p></div><button class="filter">筛选告警 ⌄</button></div><section class="panel alerts-full"><div id="alert-list"></div></section></section>
-      <section class="view" id="audit"><div class="view-heading"><div><h2>审计日志</h2><p>记录平台中的关键操作与变更</p></div><button class="filter">导出日志 ↓</button></div><section class="panel audit-list" id="audit-list"></section></section>
+      <section class="view" id="assets"><div class="view-heading"><div><h2>资产管理</h2><p>统一管理公司基础设施与服务节点</p></div><button class="primary" id="add-asset">＋ 添加资产</button></div><div class="table-controls"><label class="search">⌕<input id="asset-search" placeholder="搜索名称、IP 或负责人" /></label><select class="filter" id="asset-environment-filter"><option value="">环境：全部</option><option value="生产">生产环境</option><option value="测试">测试环境</option></select><select class="filter" id="asset-status-filter"><option value="">状态：全部</option><option value="正常">正常</option><option value="注意">注意</option><option value="告警">告警</option></select></div><section class="panel table-panel"><table><thead><tr><th>资产名称</th><th>IP 地址</th><th>环境</th><th>类型</th><th>负责人</th><th>状态</th><th>最后巡检</th><th></th></tr></thead><tbody id="asset-body"></tbody></table></section></section>
+      <section class="view" id="checks"><div class="view-heading"><div><h2>巡检中心</h2><p>执行标准化检测任务并追踪执行结果</p></div><button class="primary" id="new-check">＋ 新建巡检任务</button></div><div class="check-layout"><section class="panel check-panel"><div class="panel-head"><div><h2>预设巡检任务</h2><p>选择任务后立即执行</p></div></div><div id="check-cards"></div></section><section class="panel execution"><div class="panel-head"><div><h2>执行记录</h2><p>最近任务运行状态</p></div></div><div id="execution-list"></div></section></div><section class="panel custom-tasks"><div class="panel-head"><div><h2>自定义巡检任务</h2><p>使用你设置的目标地址执行真实健康检查</p></div></div><div id="custom-task-list"></div></section></section>
+      <section class="view" id="alerts"><div class="view-heading"><div><h2>告警中心</h2><p>共 <span id="all-alert-count">3</span> 条待处理事件</p></div><select class="filter" id="alert-level-filter"><option value="">全部级别</option><option value="critical">严重</option><option value="warning">警告</option><option value="info">通知</option></select></div><section class="panel alerts-full"><div id="alert-list"></div></section></section>
+      <section class="view" id="audit"><div class="view-heading"><div><h2>审计日志</h2><p>记录平台中的关键操作与变更</p></div><button class="filter" id="export-audit">导出日志 ↓</button></div><section class="panel audit-list" id="audit-list"></section></section>
     </main>
     <div class="toast" id="toast"></div>
-    <div class="modal-backdrop" id="asset-modal"><div class="modal"><button class="close" data-close="asset-modal">×</button><h2>添加资产</h2><p>将新基础设施纳入健康监测。</p><label>资产名称<input placeholder="例如：api-gateway-03" /></label><label>IP 地址<input placeholder="例如：10.20.1.28" /></label><label>所属环境<select><option>生产环境</option><option>测试环境</option></select></label><button class="primary full" data-close="asset-modal" id="save-asset">保存资产</button></div></div>
+    <div class="modal-backdrop" id="asset-modal"><form class="modal" id="asset-form"><button type="button" class="close" data-close="asset-modal">×</button><h2 id="asset-modal-title">添加资产</h2><p>将新基础设施纳入健康监测。</p><input type="hidden" id="asset-id" /><label>资产名称<input id="asset-name" required placeholder="例如：api-gateway-03" /></label><label>IP 地址<input id="asset-ip" required placeholder="例如：10.20.1.28" /></label><label>资产类型<input id="asset-type" required placeholder="例如：应用服务" /></label><label>负责人<input id="asset-owner" required placeholder="例如：青山" /></label><label>所属环境<select id="asset-environment"><option value="生产">生产环境</option><option value="测试">测试环境</option></select></label><button class="primary full" id="save-asset">保存资产</button></form></div>
+    <div class="modal-backdrop" id="check-modal"><form class="modal" id="check-form"><button type="button" class="close" data-close="check-modal">×</button><h2>新建巡检任务</h2><p>创建后会立即对目标地址执行一次检查。</p><label>任务名称<input id="custom-check-name" required placeholder="例如：订单服务 HTTPS 健康检查" /></label><label>目标 IPv4 地址<input id="check-target" required placeholder="例如：10.20.1.24" /></label><label>检测类型<select id="check-kind"><option value="ping">主机连通性（Ping）</option><option value="tcp">TCP 端口</option><option value="http">HTTP 状态</option><option value="https">HTTPS 状态</option><option value="tls">TLS 证书</option></select></label><label id="check-port-label">端口<input id="check-port" type="number" min="1" max="65535" value="80" /></label><label id="check-path-label">请求路径<input id="check-path" value="/" placeholder="例如：/health" /></label><button class="primary full">创建并执行</button></form></div>
     <script src="./app.js"></script>
   </body>
 </html>

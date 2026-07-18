@@ -37,7 +37,20 @@ db.exec(`
     action TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS check_tasks (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    target TEXT NOT NULL,
+    port INTEGER,
+    request_path TEXT,
+    created_at TEXT NOT NULL
+  );
 `);
+
+// Keep existing local databases compatible when new features are added.
+try { db.exec('ALTER TABLE alerts ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
+try { db.exec('ALTER TABLE check_runs ADD COLUMN details TEXT'); } catch (_) {}
 
 const count = db.prepare('SELECT COUNT(*) AS total FROM assets').get().total;
 if (count === 0) {

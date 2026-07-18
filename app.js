@@ -1,29 +1,199 @@
-let assets=[
- {name:'api-gateway-01',ip:'10.20.1.11',env:'生产',type:'容器节点',owner:'陈宇',status:'正常',check:'2 分钟前',service:'API Gateway'},
- {name:'order-service-02',ip:'10.20.1.24',env:'生产',type:'应用服务',owner:'林睿',status:'告警',check:'5 分钟前',service:'Order Service'},
- {name:'mysql-primary-01',ip:'10.20.2.10',env:'生产',type:'数据库',owner:'周明',status:'正常',check:'刚刚',service:'MySQL Primary'},
- {name:'redis-cache-01',ip:'10.20.2.31',env:'生产',type:'缓存服务',owner:'陈宇',status:'正常',check:'1 分钟前',service:'Redis Cache'},
- {name:'web-portal-staging',ip:'10.30.1.18',env:'测试',type:'Web 服务',owner:'孙宁',status:'注意',check:'8 分钟前',service:'Web Portal'},
- {name:'monitor-agent-01',ip:'10.20.3.8',env:'生产',type:'监控节点',owner:'陈宇',status:'正常',check:'刚刚',service:'Monitor Agent'}
+let assets = [];
+let alerts = [];
+let records = [];
+let audit = [];
+let customTasks = [];
+let filters = { query: '', environment: '', status: '', alertLevel: '' };
+
+const tasks = [
+  ['◌', '主机连通性检测', '验证目标主机网络连通与延迟'],
+  ['▤', '磁盘空间巡检', '检查所有挂载点的剩余容量'],
+  ['⌁', '服务端口检测', '验证关键服务端口监听状态'],
+  ['⌁', 'HTTP 健康检查', '请求服务健康检查端点'],
+  ['◇', 'SSL 证书检测', '检查证书有效期与签发状态']
 ];
-let alerts=[
- {id:1,level:'critical',title:'order-service-02 CPU 使用率持续过高',detail:'当前使用率 92%，已超过 85% 阈值并持续 15 分钟。',asset:'order-service-02',time:'12 分钟前'},
- {id:2,level:'warning',title:'web-portal-staging SSL 证书即将过期',detail:'证书将在 7 天后失效，请安排续期。',asset:'web-portal-staging',time:'38 分钟前'},
- {id:3,level:'info',title:'api-gateway-01 检测到配置变更',detail:'负载均衡路由规则已被更新。',asset:'api-gateway-01',time:'1 小时前'}
-];
-const tasks=[['◌','主机连通性检测','验证目标主机网络连通与延迟'],['▤','磁盘空间巡检','检查所有挂载点的剩余容量'],['⌁','服务端口检测','验证关键服务端口监听状态'],['⌁','HTTP 健康检查','请求服务健康检查端点'],['◇','SSL 证书检测','检查证书有效期与签发状态']];
-let records=[['主机连通性检测','生产环境 · 24 个目标','成功','10:24:18'],['磁盘空间巡检','生产环境 · 24 个目标','成功','10:00:03'],['HTTP 健康检查','生产环境 · 12 个端点','异常','09:35:42'],['SSL 证书检测','生产环境 · 8 个域名','成功','09:00:08']];
-let audit=[['陈宇','执行了全量主机连通性检测','10:24:18'],['系统','自动关闭了 api-gateway-02 的高延迟告警','10:18:02'],['林睿','将告警 #AL-2901 指派给 陈宇','09:58:41'],['陈宇','更新资产 redis-cache-01 的负责人','昨天 18:33'],['系统','完成每日 SSL 证书检测','昨天 09:00']];
-const $=s=>document.querySelector(s);const esc=s=>s.replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]));
-function statusClass(s){return s==='正常'?'ok':s==='注意'?'warn':'down'}
-function renderAssets(filter=''){ $('#asset-body').innerHTML=assets.filter(a=>Object.values(a).join(' ').toLowerCase().includes(filter.toLowerCase())).map(a=>`<tr><td class="asset-name">${a.name}<small>${a.service}</small></td><td class="mono">${a.ip}</td><td><span class="env ${a.env==='测试'?'test':''}">${a.env}环境</span></td><td>${a.type}</td><td>${a.owner}</td><td><span class="status ${statusClass(a.status)}">${a.status}</span></td><td>${a.check}</td><td><button class="row-menu">⋮</button></td></tr>`).join('') }
-function renderAlerts(){const compact=alerts.slice(0,3).map(a=>`<div class="alert-row"><span class="severity ${a.level}"></span><div><strong>${a.title}</strong><small>${a.asset}</small></div><time class="alert-time">${a.time}</time></div>`).join('');$('#dashboard-alerts').innerHTML=compact; $('#alert-list').innerHTML=alerts.map(a=>`<div class="alert-full"><span class="severity ${a.level}"></span><div><strong>${a.title}</strong><p>${a.detail} · ${a.asset} · ${a.time}</p></div><div class="alert-actions"><button class="secondary" onclick="ackAlert(${a.id})">确认告警</button><button class="primary" onclick="closeAlert(${a.id})">关闭告警</button></div></div>`).join('')||'<div class="empty">当前没有待处理告警，环境很安静。</div>';$('#alert-count').textContent=alerts.length;$('#all-alert-count').textContent=alerts.length}
-function renderServices(){$('#service-list').innerHTML=assets.slice(0,5).map(a=>`<div class="service-row"><span class="service-dot" style="background:${a.status==='正常'?'#23b28a':a.status==='注意'?'#e4a13a':'#df5961'}"></span><div><b>${a.service}</b><small>${a.ip}</small></div><span class="badge ${a.status==='正常'?'ok':'warn'}">${a.status==='正常'?'正常':'需关注'}</span></div>`).join('')}
-function renderChecks(){const html=records.slice(0,3).map(r=>`<div class="recent-item"><span class="check-status">✓</span><div><b>${r[0]}</b><small>${r[1]}</small></div><time>${r[3]}</time></div>`).join('');$('#recent-checks').innerHTML=html;$('#check-cards').innerHTML=tasks.map(t=>`<div class="check-card"><span class="task-icon">${t[0]}</span><div><b>${t[1]}</b><p>${t[2]}</p></div><button class="run" data-run="${t[1]}">运行</button></div>`).join('');$('#execution-list').innerHTML=records.map(r=>`<div class="execution-item"><span class="check-status">${r[2]==='异常'?'!':'✓'}</span><div><b>${r[0]}</b><p>${r[1]}</p><time>${r[3]}</time></div><span class="badge ${r[2]==='成功'?'ok':'warn'}">${r[2]}</span></div>`).join('')}
-function renderAudit(){$('#audit-list').innerHTML=audit.map(a=>`<div class="audit-item"><span class="audit-symbol">⌁</span><div><b>${a[0]}</b><p>${a[1]}</p></div><time>${a[2]}</time></div>`).join('')}
-function applyDashboard(data){assets=data.assets;alerts=data.alerts;records=data.records.map(r=>[r.name,r.scope,r.result,r.time]);audit=data.audit.map(a=>[a.actor,a.action,a.time]);renderAssets();renderAlerts();renderServices();renderChecks();renderAudit();$('#updated-at').textContent='刚刚'}
-async function refreshDashboard(){try{applyDashboard(await fetch('/api/dashboard').then(r=>r.json()))}catch(error){console.warn('API unavailable, using demo data',error)}}
-function toast(msg){const t=$('#toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)}
-async function startTask(name){toast(`正在执行「${name}」...`);try{const response=await fetch('/api/checks/run',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({taskName:name})});applyDashboard(await response.json());toast(`「${name}」已完成，所有目标正常`)}catch(error){toast('无法连接本机服务，请检查后端是否已启动')}}
-window.closeAlert=async id=>{try{const response=await fetch(`/api/alerts/${id}/close`,{method:'POST'});applyDashboard(await response.json());toast('告警已关闭并记录到审计日志')}catch(error){toast('无法连接本机服务，请检查后端是否已启动')}};window.ackAlert=id=>{toast(`告警 #AL-${2900+id} 已确认，等待处理`) };
-document.querySelectorAll('.nav-item').forEach(b=>b.onclick=()=>{document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));$('#'+b.dataset.view).classList.add('active');const labels={dashboard:['控制台','运行总览'],assets:['资源中心','资产管理'],checks:['作业中心','巡检中心'],alerts:['事件中心','告警中心'],audit:['合规中心','审计日志']};$('#page-kicker').textContent=labels[b.dataset.view][0];$('#page-title').textContent=labels[b.dataset.view][1]});document.querySelectorAll('[data-go]').forEach(b=>b.onclick=()=>document.querySelector(`[data-view="${b.dataset.go}"]`).click());$('#asset-search').oninput=e=>renderAssets(e.target.value);$('#run-all').onclick=()=>startTask('全量巡检');$('#add-asset').onclick=()=>$('#asset-modal').classList.add('show');document.querySelectorAll('[data-close]').forEach(b=>b.onclick=()=>$('#'+b.dataset.close).classList.remove('show'));$('#save-asset').onclick=()=>toast('资产已保存，等待首次巡检');$('#new-check').onclick=()=>toast('已创建一份新的空白巡检任务');document.addEventListener('click',e=>{if(e.target.matches('[data-run]'))startTask(e.target.dataset.run)});function updateClock(){$('#clock').textContent=new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit',second:'2-digit',hour12:false}).format(new Date())+' CST'}setInterval(updateClock,1000);updateClock();renderAssets();renderAlerts();renderServices();renderChecks();renderAudit();refreshDashboard();
+
+const $ = selector => document.querySelector(selector);
+const statusClass = status => status === '正常' ? 'ok' : status === '注意' ? 'warn' : 'down';
+
+function toast(message) {
+  const element = $('#toast');
+  element.textContent = message;
+  element.classList.add('show');
+  window.clearTimeout(toast.timer);
+  toast.timer = window.setTimeout(() => element.classList.remove('show'), 2600);
+}
+
+async function request(url, options = {}) {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '请求失败');
+  return data;
+}
+
+function filteredAssets() {
+  return assets.filter(asset => {
+    const matchesQuery = Object.values(asset).join(' ').toLowerCase().includes(filters.query.toLowerCase());
+    return matchesQuery && (!filters.environment || asset.env === filters.environment) && (!filters.status || asset.status === filters.status);
+  });
+}
+
+function renderAssets() {
+  const rows = filteredAssets();
+  $('#asset-body').innerHTML = rows.length ? rows.map(asset => `
+    <tr>
+      <td class="asset-name">${asset.name}<small>${asset.service}</small></td>
+      <td class="mono">${asset.ip}</td>
+      <td><span class="env ${asset.env === '测试' ? 'test' : ''}">${asset.env}环境</span></td>
+      <td>${asset.type}</td><td>${asset.owner}</td>
+      <td><span class="status ${statusClass(asset.status)}">${asset.status}</span></td>
+      <td>${asset.check}</td><td><button class="row-menu" title="编辑资产" data-edit-asset="${asset.id}">编辑</button><button class="row-menu" title="删除资产" data-delete-asset="${asset.id}">删除</button></td>
+    </tr>`).join('') : '<tr><td colspan="8" class="empty-cell">没有符合条件的资产</td></tr>';
+}
+
+function renderAlerts() {
+  const visibleAlerts = alerts.filter(alert => !filters.alertLevel || alert.level === filters.alertLevel);
+  $('#dashboard-alerts').innerHTML = alerts.slice(0, 3).map(alert => `
+    <div class="alert-row"><span class="severity ${alert.level}"></span><div><strong>${alert.title}</strong><small>${alert.asset}</small></div><time class="alert-time">${alert.time}</time></div>`).join('');
+  $('#alert-list').innerHTML = visibleAlerts.length ? visibleAlerts.map(alert => `
+    <div class="alert-full"><span class="severity ${alert.level}"></span><div><strong>${alert.title}</strong><p>${alert.detail} · ${alert.asset} · ${alert.time}${alert.acknowledged ? ' · 已确认' : ''}</p></div><div class="alert-actions">
+      <button class="secondary" ${alert.acknowledged ? 'disabled' : ''} data-acknowledge="${alert.id}">${alert.acknowledged ? '已确认' : '确认告警'}</button>
+      <button class="primary" data-close-alert="${alert.id}">关闭告警</button></div></div>`).join('') : '<div class="empty">当前没有符合条件的待处理告警。</div>';
+  $('#alert-count').textContent = alerts.length;
+  $('#all-alert-count').textContent = alerts.length;
+}
+
+function renderServices() {
+  $('#service-list').innerHTML = assets.slice(0, 5).map(asset => `
+    <div class="service-row"><span class="service-dot" style="background:${asset.status === '正常' ? '#23b28a' : asset.status === '注意' ? '#e4a13a' : '#df5961'}"></span><div><b>${asset.service}</b><small>${asset.ip}</small></div><span class="badge ${asset.status === '正常' ? 'ok' : 'warn'}">${asset.status === '正常' ? '正常' : '需关注'}</span></div>`).join('');
+}
+
+function renderChecks() {
+  $('#recent-checks').innerHTML = records.slice(0, 3).map(record => `
+    <div class="recent-item"><span class="check-status">${record.result === '异常' ? '!' : '✓'}</span><div><b>${record.name}</b><small>${record.scope}</small></div><time>${record.time}</time></div>`).join('');
+  $('#check-cards').innerHTML = tasks.map(task => `
+    <div class="check-card"><span class="task-icon">${task[0]}</span><div><b>${task[1]}</b><p>${task[2]}</p></div><button class="run" data-run="${task[1]}">运行</button></div>`).join('');
+  $('#execution-list').innerHTML = records.map(record => `
+    <div class="execution-item"><span class="check-status">${record.result === '异常' ? '!' : '✓'}</span><div><b>${record.name}</b><p>${record.scope}</p><time>${record.time}</time></div><span class="badge ${record.result === '成功' ? 'ok' : 'warn'}">${record.result}</span></div>`).join('');
+  $('#custom-task-list').innerHTML = customTasks.length ? customTasks.map(task => `
+    <div class="check-card"><span class="task-icon">${task.kind === 'ping' ? '◌' : task.kind === 'tcp' ? '▤' : '⌁'}</span><div><b>${task.name}</b><p>${task.kind.toUpperCase()} · ${task.target}${task.port ? `:${task.port}` : ''}${task.requestPath && task.kind !== 'ping' ? task.requestPath : ''}</p></div><button class="run" data-run-custom="${task.id}">运行</button></div>`).join('') : '<div class="empty">尚未创建自定义巡检任务。</div>';
+}
+
+function renderAudit() {
+  $('#audit-list').innerHTML = audit.length ? audit.map(item => `
+    <div class="audit-item"><span class="audit-symbol">⌁</span><div><b>${item.actor}</b><p>${item.action}</p></div><time>${item.time}</time></div>`).join('') : '<div class="empty">尚无审计记录。</div>';
+}
+
+function applyDashboard(data) {
+  assets = data.assets;
+  alerts = data.alerts;
+  records = data.records;
+  audit = data.audit;
+  customTasks = data.tasks || [];
+  renderAssets(); renderAlerts(); renderServices(); renderChecks(); renderAudit();
+  $('#updated-at').textContent = '刚刚';
+}
+
+async function refreshDashboard() {
+  try { applyDashboard(await request('/api/dashboard')); }
+  catch (error) { toast('无法连接本机服务，请先启动后端'); }
+}
+
+async function runCheck(taskName) {
+  toast(`正在执行「${taskName}」...`);
+  try {
+    applyDashboard(await request('/api/checks/run', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ taskName }) }));
+    toast(`「${taskName}」已完成`);
+  } catch (error) { toast(error.message); }
+}
+
+function openModal(id) { $(`#${id}`).classList.add('show'); }
+function closeModal(id) { $(`#${id}`).classList.remove('show'); }
+
+function setView(view) {
+  document.querySelectorAll('.nav-item').forEach(button => button.classList.toggle('active', button.dataset.view === view));
+  document.querySelectorAll('.view').forEach(section => section.classList.toggle('active', section.id === view));
+  const labels = { dashboard: ['控制台', '运行总览'], assets: ['资源中心', '资产管理'], checks: ['作业中心', '巡检中心'], alerts: ['事件中心', '告警中心'], audit: ['合规中心', '审计日志'] };
+  $('#page-kicker').textContent = labels[view][0]; $('#page-title').textContent = labels[view][1];
+}
+
+document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
+document.querySelectorAll('[data-go]').forEach(button => button.addEventListener('click', () => setView(button.dataset.go)));
+document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => closeModal(button.dataset.close)));
+
+$('#asset-search').addEventListener('input', event => { filters.query = event.target.value; renderAssets(); });
+$('#asset-environment-filter').addEventListener('change', event => { filters.environment = event.target.value; renderAssets(); });
+$('#asset-status-filter').addEventListener('change', event => { filters.status = event.target.value; renderAssets(); });
+$('#alert-level-filter').addEventListener('change', event => { filters.alertLevel = event.target.value; renderAlerts(); });
+$('#add-asset').addEventListener('click', () => { $('#asset-form').reset(); $('#asset-id').value = ''; $('#asset-modal-title').textContent = '添加资产'; openModal('asset-modal'); });
+$('#new-check').addEventListener('click', () => openModal('check-modal'));
+$('#run-all').addEventListener('click', () => runCheck('全量巡检'));
+
+$('#asset-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const button = $('#save-asset'); button.disabled = true;
+  const id = $('#asset-id').value;
+  const payload = { name: $('#asset-name').value, ip: $('#asset-ip').value, type: $('#asset-type').value, owner: $('#asset-owner').value, environment: $('#asset-environment').value };
+  try {
+    applyDashboard(await request(id ? `/api/assets/${id}` : '/api/assets', { method: id ? 'PUT' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }));
+    event.target.reset(); $('#asset-id').value = ''; closeModal('asset-modal'); setView('assets'); toast(`资产「${payload.name}」已${id ? '更新' : '添加'}`);
+  } catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
+
+$('#check-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const payload = { name: $('#custom-check-name').value.trim(), target: $('#check-target').value.trim(), kind: $('#check-kind').value, port: Number($('#check-port').value), requestPath: $('#check-path').value.trim() || '/' };
+  try {
+    const data = await request('/api/check-tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    applyDashboard(data); closeModal('check-modal'); event.target.reset(); toast('巡检任务已创建，正在执行');
+    await runCustomCheck(data.taskId);
+  } catch (error) { toast(error.message); }
+});
+
+async function runCustomCheck(id) {
+  try {
+    const data = await request(`/api/check-tasks/${id}/run`, { method: 'POST' });
+    applyDashboard(data); toast(`${data.outcome.result === '成功' ? '巡检成功' : '巡检异常'}：${data.outcome.details}`);
+  } catch (error) { toast(error.message); }
+}
+
+function beginEditAsset(id) {
+  const asset = assets.find(item => item.id === id); if (!asset) return;
+  $('#asset-id').value = asset.id; $('#asset-name').value = asset.name; $('#asset-ip').value = asset.ip; $('#asset-type').value = asset.type; $('#asset-owner').value = asset.owner; $('#asset-environment').value = asset.env;
+  $('#asset-modal-title').textContent = '编辑资产'; openModal('asset-modal');
+}
+
+$('#export-audit').addEventListener('click', () => { window.location.href = '/api/audit/export'; });
+$('#notifications').addEventListener('click', () => setView('alerts'));
+$('#help').addEventListener('click', () => toast('可通过资产、巡检、告警与审计模块完成日常运维操作'));
+$('#settings').addEventListener('click', () => toast('当前用户：青山 · 平台运维工程师'));
+document.addEventListener('click', async event => {
+  const task = event.target.dataset.run;
+  const closeId = event.target.dataset.closeAlert;
+  const acknowledgeId = event.target.dataset.acknowledge;
+  const editAssetId = event.target.dataset.editAsset;
+  const deleteAssetId = event.target.dataset.deleteAsset;
+  if (task) return runCheck(task);
+  if (event.target.dataset.runCustom) return runCustomCheck(event.target.dataset.runCustom);
+  if (editAssetId) return beginEditAsset(Number(editAssetId));
+  if (deleteAssetId) {
+    const asset = assets.find(item => item.id === Number(deleteAssetId));
+    if (!asset || !window.confirm(`确定删除资产「${asset.name}」吗？`)) return;
+    try { applyDashboard(await request(`/api/assets/${deleteAssetId}`, { method: 'DELETE' })); toast(`资产「${asset.name}」已删除`); } catch (error) { toast(error.message); }
+    return;
+  }
+  try {
+    if (closeId) { applyDashboard(await request(`/api/alerts/${closeId}/close`, { method: 'POST' })); toast('告警已关闭并记录到审计日志'); }
+    if (acknowledgeId) { applyDashboard(await request(`/api/alerts/${acknowledgeId}/acknowledge`, { method: 'POST' })); toast('告警已确认'); }
+  } catch (error) { toast(error.message); }
+});
+
+$('#check-kind').addEventListener('change', event => {
+  const kind = event.target.value; const port = $('#check-port');
+  if (kind === 'ping') { $('#check-port-label').style.display = 'none'; $('#check-path-label').style.display = 'none'; }
+  else { $('#check-port-label').style.display = 'block'; $('#check-path-label').style.display = ['http', 'https'].includes(kind) ? 'block' : 'none'; port.value = kind === 'http' ? 80 : 443; }
+});
+
+function updateClock() { $('#clock').textContent = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date()) + ' CST'; }
+updateClock(); window.setInterval(updateClock, 1000); refreshDashboard();
