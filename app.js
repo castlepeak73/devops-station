@@ -62,6 +62,11 @@ function renderAlerts() {
       <button class="primary" data-close-alert="${alert.id}">关闭告警</button></div></div>`).join('') : '<div class="empty">当前没有符合条件的待处理告警。</div>';
   $('#alert-count').textContent = alerts.length;
   $('#all-alert-count').textContent = alerts.length;
+  $('#sidebar-alert-count').textContent = alerts.length;
+}
+
+function renderSidebarCounts() {
+  $('#sidebar-asset-count').textContent = assets.length;
 }
 
 function renderServices() {
@@ -71,11 +76,11 @@ function renderServices() {
 
 function renderChecks() {
   $('#recent-checks').innerHTML = records.slice(0, 3).map(record => `
-    <div class="recent-item"><span class="check-status">${record.result === '异常' ? '!' : '✓'}</span><div><b>${record.name}</b><small>${record.scope}</small></div><time>${record.time}</time>${record.id ? `<button class="text-button" data-check-detail="${record.id}">详情</button>` : ''}</div>`).join('');
+    <div class="recent-item"><span class="check-status">${record.result === '成功' ? '✓' : record.result === '无监听' ? '−' : '!'}</span><div><b>${record.name}</b><small>${record.scope}</small></div><time>${record.time}</time>${record.id ? `<button class="text-button" data-check-detail="${record.id}">详情</button>` : ''}</div>`).join('');
   $('#check-cards').innerHTML = tasks.map(task => `
     <div class="check-card"><span class="task-icon">${task[0]}</span><div><b>${task[1]}</b><p>${task[2]}</p></div><button class="run" data-run="${task[1]}">运行</button></div>`).join('');
   $('#execution-list').innerHTML = records.map(record => `
-    <div class="execution-item"><span class="check-status">${record.result === '异常' ? '!' : '✓'}</span><div><b>${record.name}</b><p>${record.scope}</p><time>${record.time}</time></div><span class="badge ${record.result === '成功' ? 'ok' : 'warn'}">${record.result}</span>${record.id ? `<button class="text-button" data-check-detail="${record.id}">查看</button>` : ''}</div>`).join('');
+    <div class="execution-item"><span class="check-status">${record.result === '成功' ? '✓' : record.result === '无监听' ? '−' : '!'}</span><div><b>${record.name}</b><p>${record.scope}</p><time>${record.time}</time></div><span class="badge ${record.result === '成功' ? 'ok' : 'warn'}">${record.result}</span>${record.id ? `<button class="text-button" data-check-detail="${record.id}">查看</button>` : ''}</div>`).join('');
   $('#custom-task-list').innerHTML = customTasks.length ? customTasks.map(task => `
     <div class="check-card"><span class="task-icon">${task.kind === 'ping' ? '◌' : task.kind === 'tcp' ? '▤' : '⌁'}</span><div><b>${task.name}</b><p>${task.kind.toUpperCase()} · ${task.target}${task.port ? `:${task.port}` : ''}${task.requestPath && task.kind !== 'ping' ? task.requestPath : ''}</p></div><button class="run" data-run-custom="${task.id}">运行</button></div>`).join('') : '<div class="empty">尚未创建自定义巡检任务。</div>';
 }
@@ -92,7 +97,7 @@ function applyDashboard(data) {
   audit = data.audit;
   customTasks = data.tasks || [];
   $('#check-asset').innerHTML = assets.map(asset => `<option value="${asset.id}" data-ip="${asset.ip}">${asset.name} · ${asset.ip}</option>`).join('');
-  renderAssets(); renderAlerts(); renderServices(); renderChecks(); renderAudit();
+  renderAssets(); renderAlerts(); renderSidebarCounts(); renderServices(); renderChecks(); renderAudit();
   $('#updated-at').textContent = '刚刚';
 }
 
@@ -147,7 +152,7 @@ $('#check-form').addEventListener('submit', async event => {
   event.preventDefault();
   const kind = $('#check-kind').value;
   const selectedOption = $('#check-asset').selectedOptions[0];
-  const payload = { name: $('#custom-check-name').value.trim(), target: selectedOption?.dataset.ip, kind, port: Number($('#check-port').value), requestPath: $('#check-path').value.trim() || '/', assetId: Number($('#check-asset').value), connectionType: kind === 'host' ? $('#connection-type').value : null, sshPort: Number($('#ssh-port').value), sshUsername: $('#ssh-username').value.trim(), sshKeyPath: $('#ssh-key-path').value.trim() };
+  const payload = { name: $('#custom-check-name').value.trim(), target: selectedOption?.dataset.ip, kind, port: Number($('#check-port').value), requestPath: $('#check-path').value.trim() || '/', assetId: Number($('#check-asset').value), connectionType: kind === 'host' ? $('#connection-type').value : null, sshPort: Number($('#ssh-port').value), sshUsername: $('#ssh-username').value.trim(), sshKeyPath: $('#ssh-key-path').value.trim(), sshPlatform: $('#ssh-platform').value };
   closeModal('check-modal'); event.target.reset();
   try {
     const data = await request('/api/check-tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -159,7 +164,8 @@ $('#check-form').addEventListener('submit', async event => {
 async function runCustomCheck(id) {
   try {
     const data = await request(`/api/check-tasks/${id}/run`, { method: 'POST' });
-    applyDashboard(data); toast(`${data.outcome.result === '成功' ? '巡检成功' : '巡检异常'}：${data.outcome.details}`);
+    const message = data.outcome.result === '成功' ? '巡检正常' : data.outcome.result === '无监听' ? '端口无监听' : '巡检异常';
+    applyDashboard(data); toast(`${message}：${data.outcome.details}`);
   } catch (error) { toast(error.message); }
 }
 
@@ -232,7 +238,7 @@ $('#check-kind').addEventListener('change', event => {
   const kind = event.target.value; const port = $('#check-port');
   const host = kind === 'host'; $('#check-asset-label').style.display = 'block'; $('#host-connection-fields').style.display = host ? 'block' : 'none';
   if (kind === 'ping' || host) { $('#check-port-label').style.display = 'none'; $('#check-path-label').style.display = 'none'; }
-  else { $('#check-port-label').style.display = 'block'; $('#check-path-label').style.display = ['http', 'https'].includes(kind) ? 'block' : 'none'; port.value = kind === 'http' ? 80 : 443; }
+  else { $('#check-port-label').style.display = 'block'; $('#check-path-label').style.display = 'none'; port.value = kind === 'http' ? 80 : 443; }
 });
 
 $('#connection-type').addEventListener('change', event => { $('#ssh-fields').style.display = event.target.value === 'ssh' ? 'block' : 'none'; });

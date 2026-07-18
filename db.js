@@ -71,6 +71,7 @@ try { db.exec('ALTER TABLE check_tasks ADD COLUMN connection_type TEXT'); } catc
 try { db.exec('ALTER TABLE check_tasks ADD COLUMN ssh_port INTEGER'); } catch (_) {}
 try { db.exec('ALTER TABLE check_tasks ADD COLUMN ssh_username TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE check_tasks ADD COLUMN ssh_key_path TEXT'); } catch (_) {}
+try { db.exec("ALTER TABLE check_tasks ADD COLUMN ssh_platform TEXT NOT NULL DEFAULT 'linux'"); } catch (_) {}
 try { db.exec('ALTER TABLE assets ADD COLUMN cpu_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
 try { db.exec('ALTER TABLE assets ADD COLUMN memory_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
 try { db.exec('ALTER TABLE assets ADD COLUMN disk_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}

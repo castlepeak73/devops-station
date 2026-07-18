@@ -26,7 +26,7 @@ function createThresholdAlert(assetId, title, detail) {
 }
 
 function evaluateThresholds(assetId, metrics) {
-  const asset = db.prepare('SELECT name FROM assets WHERE id = ?').get(assetId);
+  const asset = db.prepare('SELECT name, cpu_threshold AS cpuThreshold, memory_threshold AS memoryThreshold, disk_threshold AS diskThreshold FROM assets WHERE id = ?').get(assetId);
   if (!asset) return;
   const findings = [];
   if (Number(metrics.cpu) > asset.cpuThreshold) findings.push([`${asset.name} CPU 使用率过高`, `当前 CPU 使用率 ${metrics.cpu}%，超过 ${asset.cpuThreshold}% 阈值。`]);
@@ -43,6 +43,27 @@ function collectLocalWindowsMetrics() {
     if (error) return resolve({ result: '异常', details: `无法采集本机指标：${error.message}` });
     try { resolve({ result: '成功', metrics: JSON.parse(stdout), details: '已采集本机 Windows 指标' }); } catch (_) { resolve({ result: '异常', details: '本机指标解析失败' }); }
   }));
+}
+
+function collectWindowsSshMetrics(task) {
+  return new Promise(resolve => {
+    if (!task.ssh_username || !task.ssh_key_path || !fs.existsSync(task.ssh_key_path)) return resolve({ result: '异常', details: 'SSH 用户名或私钥文件路径无效' });
+    const script = "$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue';$os=Get-CimInstance Win32_OperatingSystem;$cpu=(Get-CimInstance Win32_Processor|Measure-Object -Property LoadPercentage -Average).Average;$disks=Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3'|ForEach-Object {[pscustomobject]@{name=$_.DeviceID;totalGb=[math]::Round($_.Size/1GB,2);usedGb=[math]::Round(($_.Size-$_.FreeSpace)/1GB,2);usage=[math]::Round((1-$_.FreeSpace/$_.Size)*100,1)}};[pscustomobject]@{cpu=[math]::Round($cpu,1);memoryTotal=[math]::Round($os.TotalVisibleMemorySize/1MB,2);memoryUsed=[math]::Round(($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)/1MB,2);memoryUsage=[math]::Round((1-$os.FreePhysicalMemory/$os.TotalVisibleMemorySize)*100,1);uptime=((Get-Date)-$os.LastBootUpTime).ToString();disks=@($disks)}|ConvertTo-Json -Compress";
+    const command = `powershell.exe -NoProfile -NonInteractive -EncodedCommand ${Buffer.from(script, 'utf16le').toString('base64')}`;
+    const client = new SshClient(); let settled = false;
+    const done = value => { if (!settled) { settled = true; client.end(); resolve(value); } };
+    client.on('ready', () => client.exec(command, (error, stream) => {
+      if (error) return done({ result: '异常', details: `SSH PowerShell 启动失败：${error.message}` }); let output = ''; let errorOutput = '';
+      stream.on('data', data => output += data); stream.stderr.on('data', data => errorOutput += data);
+      stream.on('close', code => {
+        if (code !== 0) return done({ result: '异常', details: `远程 PowerShell 执行失败：${String(errorOutput || output).slice(0, 180)}` });
+        try {
+          const metrics = JSON.parse(output.trim().replace(/^\uFEFF/, ''));
+          done({ result: '成功', metrics, details: '已通过 SSH 采集 Windows 指标' });
+        } catch (_) { done({ result: '异常', details: `远程 Windows 指标解析失败：${String(errorOutput || output).slice(0, 180)}` }); }
+      });
+    })).on('error', error => done({ result: '异常', details: `SSH 连接失败：${error.message}` })).connect({ host: task.target, port: task.ssh_port || 22, username: task.ssh_username, privateKey: fs.readFileSync(task.ssh_key_path), readyTimeout: 7000 });
+  });
 }
 
 function collectLinuxSshMetrics(task) {
@@ -69,8 +90,33 @@ function collectLinuxSshMetrics(task) {
   });
 }
 
+function collectMacSshMetrics(task) {
+  return new Promise(resolve => {
+    if (!task.ssh_username || !task.ssh_key_path || !fs.existsSync(task.ssh_key_path)) return resolve({ result: '异常', details: 'SSH 用户名或私钥文件路径无效' });
+    const client = new SshClient(); let settled = false;
+    const done = value => { if (!settled) { settled = true; client.end(); resolve(value); } };
+    const run = command => new Promise((resolveCommand, rejectCommand) => client.exec(command, (error, stream) => {
+      if (error) return rejectCommand(error); let output = '';
+      stream.on('data', data => output += data); stream.stderr.on('data', data => output += data);
+      stream.on('close', code => code === 0 ? resolveCommand(output.trim()) : rejectCommand(new Error(output || `退出码 ${code}`)));
+    }));
+    client.on('ready', async () => {
+      try {
+        const [cpuOutput, totalMemoryOutput, pageSizeOutput, vmStatOutput, diskOutput, uptimeOutput] = await Promise.all([
+          run("top -l 1 -n 0 | awk '/CPU usage/ {gsub(\"%\", \"\", $3); gsub(\"%\", \"\", $5); print $3+$5; exit}'"), run('sysctl -n hw.memsize'), run('sysctl -n hw.pagesize'), run('vm_stat'), run('df -kP'), run('uptime')
+        ]);
+        const pageValue = label => { const match = vmStatOutput.match(new RegExp(`${label}:\\s+(\\d+)\\.`)); return match ? Number(match[1]) : 0; };
+        const pageSize = Number(pageSizeOutput); const totalBytes = Number(totalMemoryOutput);
+        const usedBytes = (pageValue('Pages active') + pageValue('Pages wired down') + pageValue('Pages occupied by compressor')) * pageSize;
+        const disks = diskOutput.split('\n').slice(1).map(line => line.trim().split(/\s+/)).filter(parts => parts.length >= 6).map(parts => ({ name: parts[5], totalGb: Number((Number(parts[1]) * 1024 / 1073741824).toFixed(2)), usedGb: Number((Number(parts[2]) * 1024 / 1073741824).toFixed(2)), usage: Number(String(parts[4]).replace('%', '')) }));
+        done({ result: '成功', metrics: { cpu: Number(Number(cpuOutput).toFixed(1)), memoryTotal: Number((totalBytes / 1048576).toFixed(2)), memoryUsed: Number((usedBytes / 1048576).toFixed(2)), memoryUsage: Number((usedBytes / totalBytes * 100).toFixed(1)), uptime: uptimeOutput, disks }, details: '已通过 SSH 采集 macOS 指标' });
+      } catch (error) { done({ result: '异常', details: `SSH macOS 采集失败：${error.message}` }); }
+    }).on('error', error => done({ result: '异常', details: `SSH 连接失败：${error.message}` })).connect({ host: task.target, port: task.ssh_port || 22, username: task.ssh_username, privateKey: fs.readFileSync(task.ssh_key_path), readyTimeout: 7000 });
+  });
+}
+
 async function executeHostCheck(task) {
-  const outcome = task.connection_type === 'local' ? await collectLocalWindowsMetrics() : await collectLinuxSshMetrics(task);
+  const outcome = task.connection_type === 'local' ? await collectLocalWindowsMetrics() : task.ssh_platform === 'windows' ? await collectWindowsSshMetrics(task) : task.ssh_platform === 'macos' ? await collectMacSshMetrics(task) : await collectLinuxSshMetrics(task);
   if (outcome.metrics) {
     const metrics = outcome.metrics;
     db.prepare('INSERT INTO host_metrics (asset_id, source, cpu_usage, memory_usage, memory_total, memory_used, disk_json, uptime, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
@@ -90,7 +136,10 @@ function tcp(target, port) {
     const started = Date.now(); const socket = net.createConnection({ host: target, port });
     const done = (result, details) => { socket.destroy(); resolve({ result, details }); };
     socket.setTimeout(2500); socket.once('connect', () => done('成功', `TCP ${port} 可连接，耗时 ${Date.now() - started}ms`));
-    socket.once('timeout', () => done('异常', `TCP ${port} 连接超时`)); socket.once('error', error => done('异常', `TCP ${port} 不可用：${error.code || error.message}`));
+    socket.once('timeout', () => done('异常', `TCP ${port} 连接超时，可能被防火墙丢弃或主机不可达`));
+    socket.once('error', error => error.code === 'ECONNREFUSED'
+      ? done('无监听', `TCP ${port} 连接被目标主机拒绝：端口当前没有服务监听`)
+      : done('异常', `TCP ${port} 不可用：${error.code || error.message}`));
   });
 }
 
@@ -119,8 +168,17 @@ function certificate(target, port) {
 async function executeTask(task) {
   if (task.kind === 'ping') return ping(task.target);
   if (task.kind === 'tcp') return tcp(task.target, task.port);
-  if (task.kind === 'http') return web(task.target, task.port || 80, task.request_path, false);
-  if (task.kind === 'https') return web(task.target, task.port || 443, task.request_path, true);
+  if (task.kind === 'http' || task.kind === 'https') {
+    const port = task.port || (task.kind === 'http' ? 80 : 443);
+    const outcome = await tcp(task.target, port);
+    const protocol = task.kind.toUpperCase();
+    const details = outcome.result === '成功'
+      ? `${protocol} 端口 ${port} 可连接`
+      : outcome.result === '无监听'
+        ? `${protocol} 端口 ${port} 当前没有服务监听`
+        : `${protocol} 端口 ${port} 无法连接`;
+    return { ...outcome, details };
+  }
   if (task.kind === 'tls') return certificate(task.target, task.port || 443);
   return executeHostCheck(task);
 }
@@ -131,7 +189,7 @@ function dashboard() {
     alerts: db.prepare("SELECT id, level, title, detail, asset, acknowledged, created_at AS time FROM alerts WHERE status = 'open' ORDER BY id").all(),
     records: db.prepare('SELECT id, task_id AS taskId, task_name AS name, scope, result, details, executed_at AS time FROM check_runs ORDER BY id DESC LIMIT 20').all(),
     audit: db.prepare('SELECT actor, action, created_at AS time FROM audit_logs ORDER BY id DESC LIMIT 10').all()
-    , tasks: db.prepare('SELECT id, name, kind, target, port, request_path AS requestPath, asset_id AS assetId, connection_type AS connectionType FROM check_tasks ORDER BY id DESC').all()
+    , tasks: db.prepare('SELECT id, name, kind, target, port, request_path AS requestPath, asset_id AS assetId, connection_type AS connectionType, ssh_platform AS sshPlatform FROM check_tasks ORDER BY id DESC').all()
   };
 }
 
@@ -185,13 +243,14 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, dashboard());
     }
     if (req.method === 'POST' && url.pathname === '/api/check-tasks') {
-      const { name, kind, target, port, requestPath, assetId, connectionType, sshPort, sshUsername, sshKeyPath } = await readBody(req);
+      const { name, kind, target, port, requestPath, assetId, connectionType, sshPort, sshUsername, sshKeyPath, sshPlatform } = await readBody(req);
       const allowed = ['ping', 'tcp', 'http', 'https', 'tls', 'host']; const validPort = Number(port || (kind === 'http' ? 80 : 443));
       const asset = assetId ? db.prepare('SELECT id, ip FROM assets WHERE id = ?').get(Number(assetId)) : null;
       if (!name?.trim() || !allowed.includes(kind) || !isIpv4(target) || (kind !== 'ping' && kind !== 'host' && (!Number.isInteger(validPort) || validPort < 1 || validPort > 65535))) return sendJson(res, 422, { error: '请填写有效的任务名称、目标 IPv4 地址和端口' });
       if (kind === 'host' && (!asset || asset.ip !== target || !['local', 'ssh'].includes(connectionType))) return sendJson(res, 422, { error: '主机健康巡检必须选择已登记资产，并使用其对应 IP 地址' });
-      const result = db.prepare('INSERT INTO check_tasks (name, kind, target, port, request_path, created_at, asset_id, connection_type, ssh_port, ssh_username, ssh_key_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(name.trim(), kind, target, kind === 'ping' || kind === 'host' ? null : validPort, requestPath || '/', now(), asset?.id || null, connectionType || null, sshPort || null, sshUsername || null, sshKeyPath || null);
+      const platform = ['windows', 'macos', 'linux'].includes(sshPlatform) ? sshPlatform : 'linux';
+      const result = db.prepare('INSERT INTO check_tasks (name, kind, target, port, request_path, created_at, asset_id, connection_type, ssh_port, ssh_username, ssh_key_path, ssh_platform) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(name.trim(), kind, target, kind === 'ping' || kind === 'host' ? null : validPort, requestPath || '/', now(), asset?.id || null, connectionType || null, sshPort || null, sshUsername || null, sshKeyPath || null, platform);
       insertAudit(`创建了巡检任务 ${name.trim()}`); return sendJson(res, 201, { taskId: result.lastInsertRowid, ...dashboard() });
     }
     const taskRunMatch = url.pathname.match(/^\/api\/check-tasks\/(\d+)\/run$/);
