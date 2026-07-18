@@ -6,6 +6,7 @@ const tls = require('tls');
 const { execFile } = require('child_process');
 const httpClient = require('http');
 const httpsClient = require('https');
+const { Client: SshClient } = require('ssh2');
 const db = require('./db');
 
 const port = Number(process.env.PORT || 3000);
@@ -15,6 +16,69 @@ const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
 const readBody = req => new Promise((resolve, reject) => { let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => { try { resolve(body ? JSON.parse(body) : {}); } catch (error) { reject(error); } }); });
 const isIpv4 = value => /^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$/.test(value);
 const insertAudit = (action) => db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run('青山', action, now());
+
+function createThresholdAlert(assetId, title, detail) {
+  const active = db.prepare("SELECT id FROM alerts WHERE title = ? AND status = 'open'").get(title);
+  if (active) return;
+  const asset = db.prepare('SELECT name, cpu_threshold AS cpuThreshold, memory_threshold AS memoryThreshold, disk_threshold AS diskThreshold FROM assets WHERE id = ?').get(assetId);
+  db.prepare("INSERT INTO alerts (level, title, detail, asset, created_at) VALUES ('warning', ?, ?, ?, ?)").run(title, detail, asset?.name || '未知资产', now());
+  insertAudit(`创建了阈值告警：${title}`);
+}
+
+function evaluateThresholds(assetId, metrics) {
+  const asset = db.prepare('SELECT name FROM assets WHERE id = ?').get(assetId);
+  if (!asset) return;
+  const findings = [];
+  if (Number(metrics.cpu) > asset.cpuThreshold) findings.push([`${asset.name} CPU 使用率过高`, `当前 CPU 使用率 ${metrics.cpu}%，超过 ${asset.cpuThreshold}% 阈值。`]);
+  if (Number(metrics.memoryUsage) > asset.memoryThreshold) findings.push([`${asset.name} 内存使用率过高`, `当前内存使用率 ${metrics.memoryUsage}%，超过 ${asset.memoryThreshold}% 阈值。`]);
+  (metrics.disks || []).filter(disk => Number(disk.usage) > asset.diskThreshold).forEach(disk => findings.push([`${asset.name} 磁盘 ${disk.name} 使用率过高`, `当前磁盘使用率 ${disk.usage}%，已使用 ${disk.usedGb} GB / ${disk.totalGb} GB，超过 ${asset.diskThreshold}% 阈值。`]));
+  findings.forEach(([title, detail]) => createThresholdAlert(assetId, title, detail));
+  if (findings.length) db.prepare("UPDATE assets SET status = '告警', last_check = ? WHERE id = ?").run('刚刚', assetId);
+  else db.prepare("UPDATE assets SET status = '正常', last_check = ? WHERE id = ? AND status <> '注意'").run('刚刚', assetId);
+}
+
+function collectLocalWindowsMetrics() {
+  const script = "$os=Get-CimInstance Win32_OperatingSystem;$cpu=(Get-CimInstance Win32_Processor|Measure-Object -Property LoadPercentage -Average).Average;$disks=Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3'|ForEach-Object {[pscustomobject]@{name=$_.DeviceID;totalGb=[math]::Round($_.Size/1GB,2);usedGb=[math]::Round(($_.Size-$_.FreeSpace)/1GB,2);usage=[math]::Round((1-$_.FreeSpace/$_.Size)*100,1)}};[pscustomobject]@{cpu=[math]::Round($cpu,1);memoryTotal=[math]::Round($os.TotalVisibleMemorySize/1MB,2);memoryUsed=[math]::Round(($os.TotalVisibleMemorySize-$os.FreePhysicalMemory)/1MB,2);memoryUsage=[math]::Round((1-$os.FreePhysicalMemory/$os.TotalVisibleMemorySize)*100,1);uptime=((Get-Date)-$os.LastBootUpTime).ToString();disks=@($disks)}|ConvertTo-Json -Compress";
+  return new Promise(resolve => execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', script], { timeout: 12000 }, (error, stdout) => {
+    if (error) return resolve({ result: '异常', details: `无法采集本机指标：${error.message}` });
+    try { resolve({ result: '成功', metrics: JSON.parse(stdout), details: '已采集本机 Windows 指标' }); } catch (_) { resolve({ result: '异常', details: '本机指标解析失败' }); }
+  }));
+}
+
+function collectLinuxSshMetrics(task) {
+  return new Promise(resolve => {
+    if (!task.ssh_username || !task.ssh_key_path || !fs.existsSync(task.ssh_key_path)) return resolve({ result: '异常', details: 'SSH 用户名或私钥文件路径无效' });
+    const client = new SshClient(); let settled = false;
+    const done = value => { if (!settled) { settled = true; client.end(); resolve(value); } };
+    const run = command => new Promise((resolveCommand, rejectCommand) => client.exec(command, (error, stream) => {
+      if (error) return rejectCommand(error); let output = '';
+      stream.on('data', data => output += data); stream.stderr.on('data', data => output += data);
+      stream.on('close', code => code === 0 ? resolveCommand(output.trim()) : rejectCommand(new Error(output || `退出码 ${code}`)));
+    }));
+    client.on('ready', async () => {
+      try {
+        const [cpuOutput, memoryOutput, diskOutput, uptimeOutput] = await Promise.all([
+          run("LC_ALL=C top -bn1 | awk '/Cpu/ {print 100-$8; exit}'"), run('LC_ALL=C free -m'), run('LC_ALL=C df -P -B1'), run('uptime -p')
+        ]);
+        const memory = memoryOutput.split('\n').find(line => line.startsWith('Mem:')).trim().split(/\s+/);
+        const disks = diskOutput.split('\n').slice(1).map(line => line.trim().split(/\s+/)).filter(parts => parts.length >= 6).map(parts => ({ name: parts[5], totalGb: Number((Number(parts[1]) / 1073741824).toFixed(2)), usedGb: Number((Number(parts[2]) / 1073741824).toFixed(2)), usage: Number(String(parts[4]).replace('%', '')) }));
+        const total = Number(memory[1]); const used = Number(memory[2]);
+        done({ result: '成功', metrics: { cpu: Number(Number(cpuOutput).toFixed(1)), memoryTotal: total, memoryUsed: used, memoryUsage: Number((used / total * 100).toFixed(1)), uptime: uptimeOutput, disks }, details: '已通过 SSH 采集 Linux 指标' });
+      } catch (error) { done({ result: '异常', details: `SSH 采集失败：${error.message}` }); }
+    }).on('error', error => done({ result: '异常', details: `SSH 连接失败：${error.message}` })).connect({ host: task.target, port: task.ssh_port || 22, username: task.ssh_username, privateKey: fs.readFileSync(task.ssh_key_path), readyTimeout: 7000 });
+  });
+}
+
+async function executeHostCheck(task) {
+  const outcome = task.connection_type === 'local' ? await collectLocalWindowsMetrics() : await collectLinuxSshMetrics(task);
+  if (outcome.metrics) {
+    const metrics = outcome.metrics;
+    db.prepare('INSERT INTO host_metrics (asset_id, source, cpu_usage, memory_usage, memory_total, memory_used, disk_json, uptime, captured_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(task.asset_id, task.connection_type, metrics.cpu, metrics.memoryUsage, metrics.memoryTotal, metrics.memoryUsed, JSON.stringify(metrics.disks || []), metrics.uptime || '', now());
+    evaluateThresholds(task.asset_id, metrics);
+  }
+  return outcome;
+}
 
 function ping(target) {
   const args = process.platform === 'win32' ? ['-n', '1', '-w', '1500', target] : ['-c', '1', '-W', '2', target];
@@ -57,16 +121,17 @@ async function executeTask(task) {
   if (task.kind === 'tcp') return tcp(task.target, task.port);
   if (task.kind === 'http') return web(task.target, task.port || 80, task.request_path, false);
   if (task.kind === 'https') return web(task.target, task.port || 443, task.request_path, true);
-  return certificate(task.target, task.port || 443);
+  if (task.kind === 'tls') return certificate(task.target, task.port || 443);
+  return executeHostCheck(task);
 }
 
 function dashboard() {
   return {
-    assets: db.prepare('SELECT id, name, ip, environment AS env, type, owner, status, last_check AS "check", service FROM assets ORDER BY id').all(),
+    assets: db.prepare('SELECT id, name, ip, environment AS env, type, owner, status, last_check AS "check", service, cpu_threshold AS cpuThreshold, memory_threshold AS memoryThreshold, disk_threshold AS diskThreshold FROM assets ORDER BY id').all(),
     alerts: db.prepare("SELECT id, level, title, detail, asset, acknowledged, created_at AS time FROM alerts WHERE status = 'open' ORDER BY id").all(),
-    records: db.prepare('SELECT task_name AS name, scope, result, executed_at AS time FROM check_runs ORDER BY id DESC LIMIT 10').all(),
+    records: db.prepare('SELECT id, task_id AS taskId, task_name AS name, scope, result, details, executed_at AS time FROM check_runs ORDER BY id DESC LIMIT 20').all(),
     audit: db.prepare('SELECT actor, action, created_at AS time FROM audit_logs ORDER BY id DESC LIMIT 10').all()
-    , tasks: db.prepare('SELECT id, name, kind, target, port, request_path AS requestPath FROM check_tasks ORDER BY id DESC').all()
+    , tasks: db.prepare('SELECT id, name, kind, target, port, request_path AS requestPath, asset_id AS assetId, connection_type AS connectionType FROM check_tasks ORDER BY id DESC').all()
   };
 }
 
@@ -74,6 +139,22 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
     if (req.method === 'GET' && url.pathname === '/api/dashboard') return sendJson(res, 200, dashboard());
+    const metricsMatch = url.pathname.match(/^\/api\/assets\/(\d+)\/metrics$/);
+    if (metricsMatch && req.method === 'GET') {
+      const asset = db.prepare('SELECT id, name, ip, environment AS env, type, owner, status, last_check AS "check", service, cpu_threshold AS cpuThreshold, memory_threshold AS memoryThreshold, disk_threshold AS diskThreshold FROM assets WHERE id = ?').get(Number(metricsMatch[1]));
+      if (!asset) return sendJson(res, 404, { error: '未找到资产' });
+      const metrics = db.prepare('SELECT cpu_usage AS cpuUsage, memory_usage AS memoryUsage, memory_total AS memoryTotal, memory_used AS memoryUsed, disk_json AS diskJson, uptime, captured_at AS capturedAt, source FROM host_metrics WHERE asset_id = ? ORDER BY id DESC LIMIT 20').all(asset.id)
+        .map(metric => ({ ...metric, disks: JSON.parse(metric.diskJson || '[]') }));
+      return sendJson(res, 200, { asset, metrics });
+    }
+    const runMatch = url.pathname.match(/^\/api\/check-runs\/(\d+)$/);
+    if (runMatch && req.method === 'GET') {
+      const run = db.prepare('SELECT id, task_id AS taskId, task_name AS name, scope, result, details, executed_at AS time FROM check_runs WHERE id = ?').get(Number(runMatch[1]));
+      if (!run) return sendJson(res, 404, { error: '未找到执行记录' });
+      const task = run.taskId ? db.prepare('SELECT kind, target, port, request_path AS requestPath, asset_id AS assetId, connection_type AS connectionType FROM check_tasks WHERE id = ?').get(run.taskId) : null;
+      const metrics = task?.assetId ? db.prepare('SELECT cpu_usage AS cpuUsage, memory_usage AS memoryUsage, memory_total AS memoryTotal, memory_used AS memoryUsed, disk_json AS diskJson, uptime, captured_at AS capturedAt FROM host_metrics WHERE asset_id = ? ORDER BY id DESC LIMIT 1').get(task.assetId) : null;
+      return sendJson(res, 200, { run, task, metrics: metrics ? { ...metrics, disks: JSON.parse(metrics.diskJson || '[]') } : null });
+    }
     if (req.method === 'POST' && url.pathname === '/api/assets') {
       const { name, ip, environment, type, owner } = await readBody(req);
       if (![name, ip, environment, type, owner].every(value => typeof value === 'string' && value.trim()) || !isIpv4(ip.trim())) return sendJson(res, 422, { error: '请填写完整且有效的 IPv4 资产信息' });
@@ -93,17 +174,30 @@ const server = http.createServer(async (req, res) => {
       const asset = db.prepare('SELECT name FROM assets WHERE id = ?').get(Number(assetMatch[1])); if (!asset) return sendJson(res, 404, { error: '未找到资产' });
       db.prepare('DELETE FROM assets WHERE id = ?').run(Number(assetMatch[1])); insertAudit(`删除了资产 ${asset.name}`); return sendJson(res, 200, dashboard());
     }
+    const thresholdMatch = url.pathname.match(/^\/api\/assets\/(\d+)\/thresholds$/);
+    if (thresholdMatch && req.method === 'PUT') {
+      const { cpuThreshold, memoryThreshold, diskThreshold } = await readBody(req);
+      const values = [cpuThreshold, memoryThreshold, diskThreshold].map(Number);
+      if (values.some(value => !Number.isFinite(value) || value < 1 || value > 99)) return sendJson(res, 422, { error: '阈值必须在 1 到 99 之间' });
+      const updated = db.prepare('UPDATE assets SET cpu_threshold = ?, memory_threshold = ?, disk_threshold = ? WHERE id = ?').run(...values, Number(thresholdMatch[1]));
+      if (!updated.changes) return sendJson(res, 404, { error: '未找到资产' });
+      insertAudit(`更新了资产告警阈值：CPU ${values[0]}%，内存 ${values[1]}%，磁盘 ${values[2]}%`);
+      return sendJson(res, 200, dashboard());
+    }
     if (req.method === 'POST' && url.pathname === '/api/check-tasks') {
-      const { name, kind, target, port, requestPath } = await readBody(req);
-      const allowed = ['ping', 'tcp', 'http', 'https', 'tls']; const validPort = Number(port || (kind === 'http' ? 80 : 443));
-      if (!name?.trim() || !allowed.includes(kind) || !isIpv4(target) || (kind !== 'ping' && (!Number.isInteger(validPort) || validPort < 1 || validPort > 65535))) return sendJson(res, 422, { error: '请填写有效的任务名称、目标 IPv4 地址和端口' });
-      const result = db.prepare('INSERT INTO check_tasks (name, kind, target, port, request_path, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(name.trim(), kind, target, kind === 'ping' ? null : validPort, requestPath || '/', now());
+      const { name, kind, target, port, requestPath, assetId, connectionType, sshPort, sshUsername, sshKeyPath } = await readBody(req);
+      const allowed = ['ping', 'tcp', 'http', 'https', 'tls', 'host']; const validPort = Number(port || (kind === 'http' ? 80 : 443));
+      const asset = assetId ? db.prepare('SELECT id, ip FROM assets WHERE id = ?').get(Number(assetId)) : null;
+      if (!name?.trim() || !allowed.includes(kind) || !isIpv4(target) || (kind !== 'ping' && kind !== 'host' && (!Number.isInteger(validPort) || validPort < 1 || validPort > 65535))) return sendJson(res, 422, { error: '请填写有效的任务名称、目标 IPv4 地址和端口' });
+      if (kind === 'host' && (!asset || asset.ip !== target || !['local', 'ssh'].includes(connectionType))) return sendJson(res, 422, { error: '主机健康巡检必须选择已登记资产，并使用其对应 IP 地址' });
+      const result = db.prepare('INSERT INTO check_tasks (name, kind, target, port, request_path, created_at, asset_id, connection_type, ssh_port, ssh_username, ssh_key_path) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(name.trim(), kind, target, kind === 'ping' || kind === 'host' ? null : validPort, requestPath || '/', now(), asset?.id || null, connectionType || null, sshPort || null, sshUsername || null, sshKeyPath || null);
       insertAudit(`创建了巡检任务 ${name.trim()}`); return sendJson(res, 201, { taskId: result.lastInsertRowid, ...dashboard() });
     }
     const taskRunMatch = url.pathname.match(/^\/api\/check-tasks\/(\d+)\/run$/);
     if (taskRunMatch && req.method === 'POST') {
       const task = db.prepare('SELECT * FROM check_tasks WHERE id = ?').get(Number(taskRunMatch[1])); if (!task) return sendJson(res, 404, { error: '未找到巡检任务' });
-      const outcome = await executeTask(task); db.prepare('INSERT INTO check_runs (task_name, scope, result, executed_at, details) VALUES (?, ?, ?, ?, ?)').run(task.name, `${task.target}${task.port ? `:${task.port}` : ''}`, outcome.result, now(), outcome.details);
+      const outcome = await executeTask(task); db.prepare('INSERT INTO check_runs (task_id, asset_id, task_name, scope, result, executed_at, details) VALUES (?, ?, ?, ?, ?, ?, ?)').run(task.id, task.asset_id || null, task.name, `${task.target}${task.port ? `:${task.port}` : ''}`, outcome.result, now(), outcome.details);
       insertAudit(`执行了巡检任务 ${task.name}：${outcome.result}`); return sendJson(res, 200, { outcome, ...dashboard() });
     }
     if (req.method === 'POST' && url.pathname === '/api/checks/run') {

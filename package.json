@@ -8,6 +8,7 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
-    "better-sqlite3": "^11.7.0"
+    "better-sqlite3": "^11.7.0",
+    "ssh2": "^1.16.0"
   }
 }

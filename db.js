@@ -46,11 +46,34 @@ db.exec(`
     request_path TEXT,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS host_metrics (
+    id INTEGER PRIMARY KEY,
+    asset_id INTEGER NOT NULL,
+    source TEXT NOT NULL,
+    cpu_usage REAL,
+    memory_usage REAL,
+    memory_total REAL,
+    memory_used REAL,
+    disk_json TEXT,
+    uptime TEXT,
+    captured_at TEXT NOT NULL,
+    FOREIGN KEY(asset_id) REFERENCES assets(id)
+  );
 `);
 
 // Keep existing local databases compatible when new features are added.
 try { db.exec('ALTER TABLE alerts ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
 try { db.exec('ALTER TABLE check_runs ADD COLUMN details TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE check_runs ADD COLUMN asset_id INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE check_runs ADD COLUMN task_id INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN asset_id INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN connection_type TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN ssh_port INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN ssh_username TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN ssh_key_path TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE assets ADD COLUMN cpu_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
+try { db.exec('ALTER TABLE assets ADD COLUMN memory_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
+try { db.exec('ALTER TABLE assets ADD COLUMN disk_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
 
 const count = db.prepare('SELECT COUNT(*) AS total FROM assets').get().total;
 if (count === 0) {
