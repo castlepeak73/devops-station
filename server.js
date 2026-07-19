@@ -222,7 +222,7 @@ function dashboard() {
     assets: db.prepare('SELECT id, name, ip, environment AS env, type, owner, status, last_check AS "check", service, cpu_threshold AS cpuThreshold, memory_threshold AS memoryThreshold, disk_threshold AS diskThreshold FROM assets ORDER BY id').all(),
     alerts: db.prepare("SELECT id, level, title, detail, asset, acknowledged, created_at AS time FROM alerts WHERE status = 'open' ORDER BY id").all(),
     records: db.prepare('SELECT id, task_id AS taskId, task_name AS name, scope, result, details, executed_at AS time FROM check_runs ORDER BY id DESC LIMIT 20').all(),
-    audit: db.prepare('SELECT actor, action, created_at AS time FROM audit_logs ORDER BY id DESC LIMIT 10').all()
+    audit: db.prepare('SELECT audit_logs.actor, audit_logs.action, audit_logs.created_at AS time, users.username AS actorUsername FROM audit_logs LEFT JOIN users ON users.display_name = audit_logs.actor ORDER BY audit_logs.id DESC LIMIT 10').all()
     , tasks: db.prepare('SELECT id, name, kind, target, port, request_path AS requestPath, asset_id AS assetId, connection_type AS connectionType, ssh_platform AS sshPlatform FROM check_tasks ORDER BY id DESC').all()
   };
 }
@@ -297,6 +297,42 @@ const server = http.createServer(async (req, res) => {
       const result = db.prepare('INSERT INTO users (username, display_name, role, password_salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(username.trim(), displayName.trim(), role, salt, hashPassword(password, salt), now());
       db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run(currentUser.display_name, `创建了账号 ${username.trim()}`, now());
       return sendJson(res, 201, { id: result.lastInsertRowid });
+    }
+    if (url.pathname === '/api/audit' && req.method === 'GET') {
+      const query = String(url.searchParams.get('query') || '').trim();
+      const from = Date.parse(String(url.searchParams.get('from') || ''));
+      const to = Date.parse(String(url.searchParams.get('to') || ''));
+      const pageSize = 10;
+      const requestedPage = Math.max(1, Number(url.searchParams.get('page')) || 1);
+      const filters = [query, `%${query}%`, `%${query}%`, `%${query}%`, Number.isFinite(from) ? from : null, Number.isFinite(to) ? to : null];
+      const where = `(? = '' OR audit_logs.actor LIKE ? COLLATE NOCASE OR users.username LIKE ? COLLATE NOCASE OR audit_logs.action LIKE ? COLLATE NOCASE)
+        AND (? IS NULL OR audit_logs.created_at_ms >= ?) AND (? IS NULL OR audit_logs.created_at_ms <= ?)`;
+      const filterValues = [query, `%${query}%`, `%${query}%`, `%${query}%`, Number.isFinite(from) ? from : null, Number.isFinite(from) ? from : null, Number.isFinite(to) ? to : null, Number.isFinite(to) ? to : null];
+      const total = db.prepare(`SELECT COUNT(*) AS total FROM audit_logs LEFT JOIN users ON users.display_name = audit_logs.actor WHERE ${where}`).get(...filterValues).total;
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const page = Math.min(requestedPage, totalPages);
+      const like = `%${query}%`;
+      const rows = db.prepare(`SELECT audit_logs.actor, audit_logs.action, audit_logs.created_at AS time, users.username AS actorUsername
+        FROM audit_logs LEFT JOIN users ON users.display_name = audit_logs.actor
+        WHERE ${where} ORDER BY audit_logs.id DESC LIMIT ? OFFSET ?`).all(...filterValues, pageSize, (page - 1) * pageSize);
+      return sendJson(res, 200, { audit: rows, page, pageSize, total, totalPages });
+    }
+    if (url.pathname === '/api/alerts/history' && req.method === 'GET') {
+      const query = String(url.searchParams.get('query') || '').trim();
+      const status = ['open', 'closed'].includes(url.searchParams.get('status')) ? url.searchParams.get('status') : '';
+      const from = Date.parse(String(url.searchParams.get('from') || ''));
+      const to = Date.parse(String(url.searchParams.get('to') || ''));
+      const pageSize = 10;
+      const requestedPage = Math.max(1, Number(url.searchParams.get('page')) || 1);
+      const where = `(? = '' OR alerts.title LIKE ? COLLATE NOCASE OR alerts.detail LIKE ? COLLATE NOCASE OR alerts.asset LIKE ? COLLATE NOCASE OR alerts.acknowledged_by LIKE ? COLLATE NOCASE OR alerts.closed_by LIKE ? COLLATE NOCASE)
+        AND (? = '' OR alerts.status = ?) AND (? IS NULL OR alerts.created_at_ms >= ?) AND (? IS NULL OR alerts.created_at_ms <= ?)`;
+      const filterValues = [query, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, status, status, Number.isFinite(from) ? from : null, Number.isFinite(from) ? from : null, Number.isFinite(to) ? to : null, Number.isFinite(to) ? to : null];
+      const total = db.prepare(`SELECT COUNT(*) AS total FROM alerts WHERE ${where}`).get(...filterValues).total;
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const page = Math.min(requestedPage, totalPages);
+      const alertsHistory = db.prepare(`SELECT id, level, title, detail, asset, status, acknowledged, acknowledged_by AS acknowledgedBy, acknowledged_at AS acknowledgedAt, closed_by AS closedBy, closed_at AS closedAt, created_at AS time
+        FROM alerts WHERE ${where} ORDER BY id DESC LIMIT ? OFFSET ?`).all(...filterValues, pageSize, (page - 1) * pageSize);
+      return sendJson(res, 200, { alerts: alertsHistory, page, pageSize, total, totalPages });
     }
     const userDeleteMatch = url.pathname.match(/^\/api\/users\/(\d+)$/);
     if (userDeleteMatch && req.method === 'DELETE') {
@@ -381,17 +417,17 @@ const server = http.createServer(async (req, res) => {
     const closeMatch = url.pathname.match(/^\/api\/alerts\/(\d+)\/close$/);
     if (req.method === 'POST' && closeMatch) {
       const id = Number(closeMatch[1]);
-      const updated = db.prepare("UPDATE alerts SET status = 'closed' WHERE id = ? AND status = 'open'").run(id);
+      const updated = db.prepare("UPDATE alerts SET status = 'closed', closed_by = ?, closed_at = ? WHERE id = ? AND status = 'open'").run(currentUser.display_name, now(), id);
       if (!updated.changes) return sendJson(res, 404, { error: '未找到待处理告警' });
-      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run('陈宇', `关闭了告警 #AL-${2900 + id}`, now());
+      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run(currentUser.display_name, `关闭了告警 #AL-${2900 + id}`, now());
       return sendJson(res, 200, dashboard());
     }
     const acknowledgeMatch = url.pathname.match(/^\/api\/alerts\/(\d+)\/acknowledge$/);
     if (req.method === 'POST' && acknowledgeMatch) {
       const id = Number(acknowledgeMatch[1]);
-      const updated = db.prepare("UPDATE alerts SET acknowledged = 1 WHERE id = ? AND status = 'open'").run(id);
+      const updated = db.prepare("UPDATE alerts SET acknowledged = 1, acknowledged_by = ?, acknowledged_at = ? WHERE id = ? AND status = 'open'").run(currentUser.display_name, now(), id);
       if (!updated.changes) return sendJson(res, 404, { error: '未找到待处理告警' });
-      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run('青山', `确认了告警 #AL-${2900 + id}`, now());
+      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run(currentUser.display_name, `确认了告警 #AL-${2900 + id}`, now());
       return sendJson(res, 200, dashboard());
     }
     if (req.method === 'GET' && url.pathname === '/api/audit/export') {

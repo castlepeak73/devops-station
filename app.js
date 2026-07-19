@@ -4,7 +4,10 @@ let records = [];
 let audit = [];
 let customTasks = [];
 let selectedAssetId = null;
-let filters = { query: '', environment: '', status: '', alertLevel: '' };
+let filters = { query: '', environment: '', status: '', alertLevel: '', auditQuery: '' };
+let auditPagination = { page: 1, total: 0, totalPages: 1, pageSize: 10, from: '', to: '' };
+let alertHistory = [];
+let alertHistoryPagination = { page: 1, total: 0, totalPages: 1, pageSize: 10, query: '', status: '', from: '', to: '' };
 
 const tasks = [
   ['◌', '主机连通性检测', '验证目标主机网络连通与延迟'],
@@ -134,7 +137,71 @@ function renderChecks() {
 
 function renderAudit() {
   $('#audit-list').innerHTML = audit.length ? audit.map(item => `
-    <div class="audit-item"><span class="audit-symbol">⌁</span><div><b>${item.actor}</b><p>${item.action}</p></div><time>${item.time}</time></div>`).join('') : '<div class="empty">尚无审计记录。</div>';
+    <div class="audit-item"><span class="audit-symbol">⌁</span><div><b>${item.actor}${item.actorUsername ? ` <small>(${item.actorUsername})</small>` : ''}</b><p>${item.action}</p></div><time>${item.time}</time></div>`).join('') : '<div class="empty">没有匹配的审计记录。</div>';
+  renderAuditPagination();
+}
+
+function renderAuditPagination() {
+  const { page, total, totalPages } = auditPagination;
+  const start = Math.max(1, page - 2); const end = Math.min(totalPages, start + 4);
+  $('#audit-page-buttons').innerHTML = Array.from({ length: end - start + 1 }, (_, index) => {
+    const number = start + index;
+    return `<button class="filter ${number === page ? 'active' : ''}" data-audit-page="${number}">${number}</button>`;
+  }).join('');
+  $('#audit-prev').disabled = page <= 1;
+  $('#audit-next').disabled = page >= totalPages;
+  $('#audit-page-summary').textContent = `第 ${page} / ${totalPages} 页，共 ${total} 条`;
+  $('#audit-page-input').max = totalPages;
+}
+
+async function refreshAuditSearch() {
+  try {
+    const params = new URLSearchParams({ query: filters.auditQuery, page: String(auditPagination.page) });
+    if (auditPagination.from) params.set('from', auditPagination.from);
+    if (auditPagination.to) params.set('to', auditPagination.to);
+    const data = await request(`/api/audit?${params}`);
+    audit = data.audit;
+    auditPagination = { ...auditPagination, page: data.page, total: data.total, totalPages: data.totalPages, pageSize: data.pageSize };
+    renderAudit();
+  } catch (error) { toast(error.message); }
+}
+
+function renderAlertHistory() {
+  $('#history-list').innerHTML = alertHistory.length ? alertHistory.map(alert => {
+    const state = alert.status === 'closed' ? '已关闭' : '待处理';
+    const acknowledge = alert.acknowledgedBy ? `已确认：${alert.acknowledgedBy}${alert.acknowledgedAt ? `（${alert.acknowledgedAt}）` : ''}` : '未确认';
+    const close = alert.closedBy ? `已关闭：${alert.closedBy}${alert.closedAt ? `（${alert.closedAt}）` : ''}` : '尚未关闭';
+    return `<article class="history-item"><div><strong>${alert.title}</strong> <span class="badge ${alert.status === 'closed' ? 'ok' : 'warn'}">${state}</span></div><p>${alert.detail}</p><div class="history-meta"><span>资产：${alert.asset}</span><span>创建：${alert.time}</span><span>${acknowledge}</span><span>${close}</span></div></article>`;
+  }).join('') : '<div class="empty">没有匹配的告警历史。</div>';
+  const { page, total, totalPages } = alertHistoryPagination;
+  const start = Math.max(1, page - 2); const end = Math.min(totalPages, start + 4);
+  $('#history-page-buttons').innerHTML = Array.from({ length: end - start + 1 }, (_, index) => {
+    const number = start + index;
+    return `<button class="filter ${number === page ? 'active' : ''}" data-history-page="${number}">${number}</button>`;
+  }).join('');
+  $('#history-prev').disabled = page <= 1;
+  $('#history-next').disabled = page >= totalPages;
+  $('#history-page-summary').textContent = `第 ${page} / ${totalPages} 页，共 ${total} 条`;
+  $('#history-page-input').max = totalPages;
+}
+
+async function refreshAlertHistory() {
+  try {
+    const state = alertHistoryPagination;
+    const params = new URLSearchParams({ query: state.query, page: String(state.page), status: state.status });
+    if (state.from) params.set('from', state.from);
+    if (state.to) params.set('to', state.to);
+    const data = await request(`/api/alerts/history?${params}`);
+    alertHistory = data.alerts;
+    alertHistoryPagination = { ...state, page: data.page, total: data.total, totalPages: data.totalPages, pageSize: data.pageSize };
+    renderAlertHistory();
+  } catch (error) { toast(error.message); }
+}
+
+async function openAlertHistory() {
+  alertHistoryPagination.page = 1;
+  await refreshAlertHistory();
+  openModal('alert-history-modal');
 }
 
 function applyDashboard(data) {
@@ -142,6 +209,7 @@ function applyDashboard(data) {
   alerts = data.alerts;
   records = data.records;
   audit = data.audit;
+  auditPagination = { ...auditPagination, page: 1, total: audit.length, totalPages: 1 };
   customTasks = data.tasks || [];
   $('#check-asset').innerHTML = assets.map(asset => `<option value="${asset.id}" data-ip="${asset.ip}">${asset.name} · ${asset.ip}</option>`).join('');
   renderAssets(); renderAlerts(); renderSidebarCounts(); renderServices(); renderChecks(); renderAudit(); applyPermissions();
@@ -169,6 +237,7 @@ function setView(view) {
   document.querySelectorAll('.view').forEach(section => section.classList.toggle('active', section.id === view));
   const labels = { dashboard: ['控制台', '运行总览'], assets: ['资源中心', '资产管理'], 'asset-detail': ['资源中心', '主机详情'], checks: ['作业中心', '巡检中心'], 'check-detail': ['作业中心', '巡检结果'], alerts: ['事件中心', '告警中心'], audit: ['合规中心', '审计日志'] };
   $('#page-kicker').textContent = labels[view][0]; $('#page-title').textContent = labels[view][1];
+  if (view === 'audit') refreshAuditSearch();
 }
 
 document.querySelectorAll('.nav-item').forEach(button => button.addEventListener('click', () => setView(button.dataset.view)));
@@ -176,6 +245,24 @@ document.querySelectorAll('[data-go]').forEach(button => button.addEventListener
 document.querySelectorAll('[data-close]').forEach(button => button.addEventListener('click', () => closeModal(button.dataset.close)));
 
 $('#asset-search').addEventListener('input', event => { filters.query = event.target.value; renderAssets(); });
+$('#audit-search').addEventListener('input', event => {
+  filters.auditQuery = event.target.value;
+  auditPagination.page = 1;
+  window.clearTimeout(refreshAuditSearch.timer);
+  refreshAuditSearch.timer = window.setTimeout(refreshAuditSearch, 220);
+});
+$('#audit-filter').addEventListener('click', () => { auditPagination.from = $('#audit-from').value; auditPagination.to = $('#audit-to').value; auditPagination.page = 1; refreshAuditSearch(); });
+$('#audit-reset').addEventListener('click', () => { filters.auditQuery = ''; auditPagination = { ...auditPagination, page: 1, from: '', to: '' }; $('#audit-search').value = ''; $('#audit-from').value = ''; $('#audit-to').value = ''; refreshAuditSearch(); });
+$('#audit-prev').addEventListener('click', () => { if (auditPagination.page > 1) { auditPagination.page -= 1; refreshAuditSearch(); } });
+$('#audit-next').addEventListener('click', () => { if (auditPagination.page < auditPagination.totalPages) { auditPagination.page += 1; refreshAuditSearch(); } });
+$('#audit-go-page').addEventListener('click', () => { const page = Number($('#audit-page-input').value); if (Number.isInteger(page) && page >= 1 && page <= auditPagination.totalPages) { auditPagination.page = page; refreshAuditSearch(); } else toast('请输入有效页码'); });
+$('#alert-history').addEventListener('click', () => { openAlertHistory(); });
+$('#history-search').addEventListener('input', event => { alertHistoryPagination.query = event.target.value; alertHistoryPagination.page = 1; window.clearTimeout(refreshAlertHistory.timer); refreshAlertHistory.timer = window.setTimeout(refreshAlertHistory, 220); });
+$('#history-filter').addEventListener('click', () => { alertHistoryPagination = { ...alertHistoryPagination, page: 1, status: $('#history-status').value, from: $('#history-from').value, to: $('#history-to').value }; refreshAlertHistory(); });
+$('#history-reset').addEventListener('click', () => { alertHistoryPagination = { ...alertHistoryPagination, page: 1, query: '', status: '', from: '', to: '' }; $('#history-search').value = ''; $('#history-status').value = ''; $('#history-from').value = ''; $('#history-to').value = ''; refreshAlertHistory(); });
+$('#history-prev').addEventListener('click', () => { if (alertHistoryPagination.page > 1) { alertHistoryPagination.page -= 1; refreshAlertHistory(); } });
+$('#history-next').addEventListener('click', () => { if (alertHistoryPagination.page < alertHistoryPagination.totalPages) { alertHistoryPagination.page += 1; refreshAlertHistory(); } });
+$('#history-go-page').addEventListener('click', () => { const page = Number($('#history-page-input').value); if (Number.isInteger(page) && page >= 1 && page <= alertHistoryPagination.totalPages) { alertHistoryPagination.page = page; refreshAlertHistory(); } else toast('请输入有效页码'); });
 $('#asset-environment-filter').addEventListener('change', event => { filters.environment = event.target.value; renderAssets(); });
 $('#asset-status-filter').addEventListener('change', event => { filters.status = event.target.value; renderAssets(); });
 $('#alert-level-filter').addEventListener('change', event => { filters.alertLevel = event.target.value; renderAlerts(); });
@@ -314,7 +401,11 @@ document.addEventListener('click', async event => {
   const detailAssetId = event.target.dataset.detailAsset;
   const checkDetailId = event.target.dataset.checkDetail;
   const deleteUserId = event.target.dataset.deleteUser;
+  const auditPage = Number(event.target.dataset.auditPage);
+  const historyPage = Number(event.target.dataset.historyPage);
   if (task) return runCheck(task);
+  if (auditPage) { auditPagination.page = auditPage; return refreshAuditSearch(); }
+  if (historyPage) { alertHistoryPagination.page = historyPage; return refreshAlertHistory(); }
   if (event.target.dataset.runCustom) return runCustomCheck(event.target.dataset.runCustom);
   if (checkDetailId) return showCheckDetail(Number(checkDetailId));
   if (deleteUserId) {

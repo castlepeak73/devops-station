@@ -94,6 +94,40 @@ try { db.exec('ALTER TABLE assets ADD COLUMN cpu_threshold REAL NOT NULL DEFAULT
 try { db.exec('ALTER TABLE assets ADD COLUMN memory_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
 try { db.exec('ALTER TABLE assets ADD COLUMN disk_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
 try { db.exec('ALTER TABLE sessions ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
+try { db.exec('ALTER TABLE audit_logs ADD COLUMN created_at_ms INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE alerts ADD COLUMN acknowledged_by TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE alerts ADD COLUMN acknowledged_at TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE alerts ADD COLUMN closed_by TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE alerts ADD COLUMN closed_at TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE alerts ADD COLUMN created_at_ms INTEGER'); } catch (_) {}
+db.exec(`CREATE TRIGGER IF NOT EXISTS audit_logs_set_created_at_ms
+  AFTER INSERT ON audit_logs WHEN NEW.created_at_ms IS NULL
+  BEGIN UPDATE audit_logs SET created_at_ms = CAST(strftime('%s', 'now') AS INTEGER) * 1000 WHERE id = NEW.id; END;`);
+db.prepare('UPDATE audit_logs SET created_at_ms = ? WHERE created_at_ms IS NULL').run(Date.now());
+const auditTimestampCount = db.prepare('SELECT COUNT(DISTINCT created_at_ms) AS total FROM audit_logs').get().total;
+if (auditTimestampCount <= 1) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const updateAuditTimestamp = db.prepare('UPDATE audit_logs SET created_at_ms = ? WHERE id = ?');
+  db.transaction(() => db.prepare('SELECT id, created_at FROM audit_logs').all().forEach(row => {
+    const match = String(row.created_at).match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    const timestamp = match ? today.getTime() + (Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3] || 0)) * 1000 : Date.now();
+    updateAuditTimestamp.run(timestamp, row.id);
+  }))();
+}
+db.exec(`CREATE TRIGGER IF NOT EXISTS alerts_set_created_at_ms
+  AFTER INSERT ON alerts WHEN NEW.created_at_ms IS NULL
+  BEGIN UPDATE alerts SET created_at_ms = CAST(strftime('%s', 'now') AS INTEGER) * 1000 WHERE id = NEW.id; END;`);
+db.prepare('UPDATE alerts SET created_at_ms = ? WHERE created_at_ms IS NULL').run(Date.now());
+const alertTimestampCount = db.prepare('SELECT COUNT(DISTINCT created_at_ms) AS total FROM alerts').get().total;
+if (alertTimestampCount <= 1) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const updateAlertTimestamp = db.prepare('UPDATE alerts SET created_at_ms = ? WHERE id = ?');
+  db.transaction(() => db.prepare('SELECT id, created_at FROM alerts').all().forEach(row => {
+    const match = String(row.created_at).match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    const timestamp = match ? today.getTime() + (Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3] || 0)) * 1000 : Date.now();
+    updateAlertTimestamp.run(timestamp, row.id);
+  }))();
+}
 
 const count = db.prepare('SELECT COUNT(*) AS total FROM assets').get().total;
 if (count === 0) {
