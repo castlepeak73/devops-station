@@ -6,6 +6,7 @@ const tls = require('tls');
 const { execFile } = require('child_process');
 const httpClient = require('http');
 const httpsClient = require('https');
+const crypto = require('crypto');
 const { Client: SshClient } = require('ssh2');
 const db = require('./db');
 
@@ -15,7 +16,40 @@ const sendJson = (res, code, body) => { res.writeHead(code, { 'Content-Type': 'a
 const now = () => new Date().toLocaleTimeString('zh-CN', { hour12: false });
 const readBody = req => new Promise((resolve, reject) => { let body = ''; req.on('data', chunk => body += chunk); req.on('end', () => { try { resolve(body ? JSON.parse(body) : {}); } catch (error) { reject(error); } }); });
 const isIpv4 = value => /^((25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(25[0-5]|2[0-4]\d|1?\d?\d)$/.test(value);
+const isValidPassword = value => typeof value === 'string' && value.length >= 8 && value.length <= 32 && /[A-Za-z]/.test(value) && /\d/.test(value) && /[^A-Za-z0-9]/.test(value);
+const accountErrors = ({ username, displayName, password }, includeName = true) => {
+  const errors = {};
+  if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username || '')) errors.username = '用户名需为 3-32 位字母、数字或 . _ -';
+  if (includeName && (!String(displayName || '').trim() || String(displayName).trim().length > 32)) errors.displayName = '请输入 1-32 位姓名';
+  if (!isValidPassword(password)) errors.password = '密码须为 8-32 位，且包含字母、数字和特殊符号';
+  return errors;
+};
 const insertAudit = (action) => db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run('青山', action, now());
+const SESSION_COOKIE = 'devops_station_session';
+const hashToken = token => crypto.createHash('sha256').update(token).digest('hex');
+const hashPassword = (password, salt) => crypto.scryptSync(password, salt, 64).toString('hex');
+const parseCookies = header => Object.fromEntries(String(header || '').split(';').map(item => item.trim().split('=').map(decodeURIComponent)).filter(item => item.length === 2));
+const userCount = () => db.prepare('SELECT COUNT(*) AS total FROM users').get().total;
+const publicUser = user => user && ({ id: user.id, username: user.username, displayName: user.display_name, role: user.role });
+const sessionUser = req => {
+  const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+  if (!token) return null;
+  const row = db.prepare('SELECT users.id, users.username, users.display_name, users.role, sessions.id AS session_id, sessions.expires_at, sessions.persistent FROM sessions JOIN users ON users.id = sessions.user_id WHERE sessions.token_hash = ?').get(hashToken(token));
+  if (!row || row.expires_at < Date.now()) { if (row) db.prepare('DELETE FROM sessions WHERE id = ?').run(row.session_id); return null; }
+  return row;
+};
+const setSession = (res, userId, remember) => {
+  const token = crypto.randomBytes(32).toString('base64url');
+  const lifetime = remember ? 30 * 24 * 60 * 60 * 1000 : 8 * 60 * 60 * 1000;
+  db.prepare('INSERT INTO sessions (token_hash, user_id, expires_at, created_at, persistent) VALUES (?, ?, ?, ?, ?)').run(hashToken(token), userId, Date.now() + lifetime, Date.now(), remember ? 1 : 0);
+  const persistence = remember ? `; Max-Age=${Math.floor(lifetime / 1000)}` : '';
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${encodeURIComponent(token)}; HttpOnly; SameSite=Lax; Path=/${persistence}`);
+};
+const clearSession = (req, res) => {
+  const token = parseCookies(req.headers.cookie)[SESSION_COOKIE];
+  if (token) db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(hashToken(token));
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`);
+};
 
 function createThresholdAlert(assetId, title, detail) {
   const active = db.prepare("SELECT id FROM alerts WHERE title = ? AND status = 'open'").get(title);
@@ -196,6 +230,85 @@ function dashboard() {
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   try {
+    if (req.method === 'GET' && url.pathname === '/api/auth/status') {
+      const user = sessionUser(req);
+      return sendJson(res, 200, { setupRequired: userCount() === 0, user: publicUser(user), rememberSession: Boolean(user?.persistent) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/setup') {
+      if (userCount() > 0) return sendJson(res, 409, { error: '管理员账号已创建，请直接登录' });
+      const { username, displayName, password } = await readBody(req);
+      const errors = accountErrors({ username, displayName, password });
+      if (Object.keys(errors).length) return sendJson(res, 422, { error: '请检查填写内容', errors });
+      const salt = crypto.randomBytes(16).toString('hex');
+      const result = db.prepare('INSERT INTO users (username, display_name, role, password_salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(username.trim(), displayName.trim(), 'admin', salt, hashPassword(password, salt), now());
+      setSession(res, result.lastInsertRowid, true);
+      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run(displayName.trim(), '创建了首个管理员账号', now());
+      return sendJson(res, 201, { user: { id: result.lastInsertRowid, username: username.trim(), displayName: displayName.trim(), role: 'admin' } });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/login') {
+      const { username, password, remember } = await readBody(req);
+      const user = db.prepare('SELECT * FROM users WHERE username = ?').get(String(username || '').trim());
+      if (!user || !password || !crypto.timingSafeEqual(Buffer.from(user.password_hash, 'hex'), Buffer.from(hashPassword(password, user.password_salt), 'hex'))) return sendJson(res, 401, { error: '账号或密码错误' });
+      db.prepare('UPDATE users SET last_login_at = ? WHERE id = ?').run(now(), user.id);
+      setSession(res, user.id, Boolean(remember));
+      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run(user.display_name, '登录了运维检测台', now());
+      return sendJson(res, 200, { user: publicUser(user) });
+    }
+    if (req.method === 'POST' && url.pathname === '/api/auth/logout') {
+      const { keepRemembered } = await readBody(req);
+      const user = sessionUser(req);
+      if (keepRemembered && user?.persistent) return sendJson(res, 200, { ok: true, remembered: true });
+      clearSession(req, res); return sendJson(res, 200, { ok: true });
+    }
+
+    const currentUser = sessionUser(req);
+    if (url.pathname.startsWith('/api/') && !currentUser) return sendJson(res, 401, { error: '登录状态已失效，请重新登录' });
+    if ((url.pathname === '/' || url.pathname === '/index.html') && !currentUser) { res.writeHead(302, { Location: '/login.html' }); return res.end(); }
+    if (currentUser?.role === 'viewer' && req.method !== 'GET' && url.pathname.startsWith('/api/') && url.pathname !== '/api/auth/profile') return sendJson(res, 403, { error: '当前账号为只读账号，不能修改平台数据' });
+
+    if (url.pathname === '/api/auth/profile' && req.method === 'GET') return sendJson(res, 200, { user: publicUser(currentUser) });
+    if (url.pathname === '/api/auth/profile' && req.method === 'PUT') {
+      const { username, displayName } = await readBody(req);
+      const errors = {};
+      if (!/^[a-zA-Z0-9_.-]{3,32}$/.test(username || '')) errors.username = '用户名需为 3-32 位字母、数字或 . _ -';
+      if (!String(displayName || '').trim() || String(displayName).trim().length > 32) errors.displayName = '请输入 1-32 位姓名';
+      if (Object.keys(errors).length) return sendJson(res, 422, { error: '请检查填写内容', errors });
+      try {
+        db.prepare('UPDATE users SET username = ?, display_name = ? WHERE id = ?').run(username.trim(), displayName.trim(), currentUser.id);
+      } catch (error) {
+        if (String(error.message).includes('UNIQUE')) return sendJson(res, 422, { error: '请检查填写内容', errors: { username: '该用户名已被使用' } });
+        throw error;
+      }
+      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run(displayName.trim(), '更新了个人资料', now());
+      return sendJson(res, 200, { user: { id: currentUser.id, username: username.trim(), displayName: displayName.trim(), role: currentUser.role } });
+    }
+
+    if (url.pathname === '/api/users' && req.method === 'GET') {
+      if (currentUser.role !== 'admin') return sendJson(res, 403, { error: '只有管理员可以管理账号' });
+      return sendJson(res, 200, { users: db.prepare('SELECT id, username, display_name AS displayName, role, created_at AS createdAt, last_login_at AS lastLoginAt FROM users ORDER BY id').all() });
+    }
+    if (url.pathname === '/api/users' && req.method === 'POST') {
+      if (currentUser.role !== 'admin') return sendJson(res, 403, { error: '只有管理员可以创建账号' });
+      const { username, displayName, password, role } = await readBody(req);
+      const errors = accountErrors({ username, displayName, password });
+      if (!['admin', 'operator', 'viewer'].includes(role)) errors.role = '请选择有效权限';
+      if (Object.keys(errors).length) return sendJson(res, 422, { error: '请检查填写内容', errors });
+      const salt = crypto.randomBytes(16).toString('hex');
+      const result = db.prepare('INSERT INTO users (username, display_name, role, password_salt, password_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(username.trim(), displayName.trim(), role, salt, hashPassword(password, salt), now());
+      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run(currentUser.display_name, `创建了账号 ${username.trim()}`, now());
+      return sendJson(res, 201, { id: result.lastInsertRowid });
+    }
+    const userDeleteMatch = url.pathname.match(/^\/api\/users\/(\d+)$/);
+    if (userDeleteMatch && req.method === 'DELETE') {
+      if (currentUser.role !== 'admin') return sendJson(res, 403, { error: '只有管理员可以删除账号' });
+      const id = Number(userDeleteMatch[1]);
+      if (id === currentUser.id) return sendJson(res, 422, { error: '不能删除当前登录的账号' });
+      const target = db.prepare('SELECT username FROM users WHERE id = ?').get(id);
+      if (!target) return sendJson(res, 404, { error: '未找到账号' });
+      db.transaction(() => { db.prepare('DELETE FROM sessions WHERE user_id = ?').run(id); db.prepare('DELETE FROM users WHERE id = ?').run(id); })();
+      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run(currentUser.display_name, `删除了账号 ${target.username}`, now());
+      return sendJson(res, 200, { ok: true });
+    }
     if (req.method === 'GET' && url.pathname === '/api/dashboard') return sendJson(res, 200, dashboard());
     const metricsMatch = url.pathname.match(/^\/api\/assets\/(\d+)\/metrics$/);
     if (metricsMatch && req.method === 'GET') {

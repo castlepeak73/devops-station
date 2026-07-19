@@ -28,8 +28,55 @@ function toast(message) {
 async function request(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json();
-  if (!response.ok) throw new Error(data.error || '请求失败');
+  if (response.status === 401) { window.location.replace('/login.html'); throw new Error('登录状态已失效'); }
+  if (!response.ok) { const error = new Error(data.error || '请求失败'); error.fields = data.errors; throw error; }
   return data;
+}
+
+let currentUser = null;
+const roleLabel = role => ({ admin: '管理员', operator: '运维人员', viewer: '只读人员' }[role] || role);
+
+async function loadCurrentUser() {
+  const status = await request('/api/auth/status');
+  if (!status.user) return window.location.replace('/login.html');
+  currentUser = status.user;
+  $('#current-user-name').textContent = currentUser.displayName;
+  $('#current-user-role').textContent = roleLabel(currentUser.role);
+  $('#current-user-avatar').textContent = currentUser.displayName.slice(0, 2).toUpperCase();
+}
+
+async function renderUsers() {
+  const data = await request('/api/users');
+  $('#user-list').innerHTML = data.users.map(user => `<div class="user-list-item"><div><b>${user.displayName}</b><small>${user.username} · ${roleLabel(user.role)}</small></div><span class="badge ${user.role === 'viewer' ? 'warn' : 'ok'}">${roleLabel(user.role)}</span><button class="text-button" data-delete-user="${user.id}" ${user.id === currentUser.id ? 'disabled' : ''}>删除</button></div>`).join('');
+}
+
+function setAccountTab(tab) {
+  document.querySelectorAll('.account-tab').forEach(button => button.classList.toggle('active', button.dataset.accountTab === tab));
+  $('#profile-panel').hidden = tab !== 'profile';
+  $('#users-panel').hidden = tab !== 'users';
+}
+
+async function loadProfile() {
+  const data = await request('/api/auth/profile');
+  currentUser = data.user;
+  $('#profile-display-name').value = currentUser.displayName;
+  $('#profile-username').value = currentUser.username;
+  $('#profile-role').value = roleLabel(currentUser.role);
+}
+
+async function openUserManagement() {
+  await loadProfile();
+  const isAdmin = currentUser.role === 'admin';
+  $('#users-tab').hidden = !isAdmin;
+  if (isAdmin) await renderUsers();
+  setAccountTab('profile'); openModal('users-modal');
+}
+
+function applyPermissions() {
+  const readOnly = currentUser?.role === 'viewer';
+  ['#add-asset', '#new-check', '#run-all', '#run-host-check'].forEach(selector => { const element = $(selector); if (element) element.hidden = readOnly; });
+  document.querySelectorAll('.run').forEach(button => button.hidden = readOnly);
+  $('#threshold-form').querySelectorAll('input, button').forEach(element => element.disabled = readOnly);
 }
 
 function filteredAssets() {
@@ -48,7 +95,7 @@ function renderAssets() {
       <td><span class="env ${asset.env === '测试' ? 'test' : ''}">${asset.env}环境</span></td>
       <td>${asset.type}</td><td>${asset.owner}</td>
       <td><span class="status ${statusClass(asset.status)}">${asset.status}</span></td>
-      <td>${asset.check}</td><td><button class="row-menu" title="主机详情" data-detail-asset="${asset.id}">详情</button><button class="row-menu" title="编辑资产" data-edit-asset="${asset.id}">编辑</button><button class="row-menu" title="删除资产" data-delete-asset="${asset.id}">删除</button></td>
+      <td>${asset.check}</td><td><button class="row-menu" title="主机详情" data-detail-asset="${asset.id}">详情</button>${currentUser?.role === 'viewer' ? '' : `<button class="row-menu" title="编辑资产" data-edit-asset="${asset.id}">编辑</button><button class="row-menu" title="删除资产" data-delete-asset="${asset.id}">删除</button>`}</td>
     </tr>`).join('') : '<tr><td colspan="8" class="empty-cell">没有符合条件的资产</td></tr>';
 }
 
@@ -57,9 +104,9 @@ function renderAlerts() {
   $('#dashboard-alerts').innerHTML = alerts.slice(0, 3).map(alert => `
     <div class="alert-row"><span class="severity ${alert.level}"></span><div><strong>${alert.title}</strong><small>${alert.asset}</small></div><time class="alert-time">${alert.time}</time></div>`).join('');
   $('#alert-list').innerHTML = visibleAlerts.length ? visibleAlerts.map(alert => `
-    <div class="alert-full"><span class="severity ${alert.level}"></span><div><strong>${alert.title}</strong><p>${alert.detail} · ${alert.asset} · ${alert.time}${alert.acknowledged ? ' · 已确认' : ''}</p></div><div class="alert-actions">
+    <div class="alert-full"><span class="severity ${alert.level}"></span><div><strong>${alert.title}</strong><p>${alert.detail} · ${alert.asset} · ${alert.time}${alert.acknowledged ? ' · 已确认' : ''}</p></div>${currentUser?.role === 'viewer' ? '' : `<div class="alert-actions">
       <button class="secondary" ${alert.acknowledged ? 'disabled' : ''} data-acknowledge="${alert.id}">${alert.acknowledged ? '已确认' : '确认告警'}</button>
-      <button class="primary" data-close-alert="${alert.id}">关闭告警</button></div></div>`).join('') : '<div class="empty">当前没有符合条件的待处理告警。</div>';
+      <button class="primary" data-close-alert="${alert.id}">关闭告警</button></div>`}</div>`).join('') : '<div class="empty">当前没有符合条件的待处理告警。</div>';
   $('#alert-count').textContent = alerts.length;
   $('#all-alert-count').textContent = alerts.length;
   $('#sidebar-alert-count').textContent = alerts.length;
@@ -97,7 +144,7 @@ function applyDashboard(data) {
   audit = data.audit;
   customTasks = data.tasks || [];
   $('#check-asset').innerHTML = assets.map(asset => `<option value="${asset.id}" data-ip="${asset.ip}">${asset.name} · ${asset.ip}</option>`).join('');
-  renderAssets(); renderAlerts(); renderSidebarCounts(); renderServices(); renderChecks(); renderAudit();
+  renderAssets(); renderAlerts(); renderSidebarCounts(); renderServices(); renderChecks(); renderAudit(); applyPermissions();
   $('#updated-at').textContent = '刚刚';
 }
 
@@ -208,8 +255,57 @@ async function showCheckDetail(id) {
 $('#export-audit').addEventListener('click', () => { window.location.href = '/api/audit/export'; });
 $('#notifications').addEventListener('click', () => setView('alerts'));
 $('#help').addEventListener('click', () => toast('可通过资产、巡检、告警与审计模块完成日常运维操作'));
-$('#settings').addEventListener('click', () => toast('当前用户：青山 · 平台运维工程师'));
+$('#settings').addEventListener('click', () => { openUserManagement().catch(error => toast(error.message)); });
+$('#profile-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  $('#profile-username-error').textContent = ''; $('#profile-display-name-error').textContent = '';
+  try {
+    const data = await request('/api/auth/profile', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#profile-username').value.trim(), displayName: $('#profile-display-name').value.trim() }) });
+    currentUser = data.user;
+    $('#current-user-name').textContent = currentUser.displayName;
+    $('#current-user-avatar').textContent = currentUser.displayName.slice(0, 2).toUpperCase();
+    localStorage.setItem('devops-station-username', currentUser.username);
+    toast('个人资料已保存');
+  } catch (error) {
+    if (error.fields) {
+      if (error.fields.username) $('#profile-username-error').textContent = error.fields.username;
+      if (error.fields.displayName) $('#profile-display-name-error').textContent = error.fields.displayName;
+    } else toast(error.message);
+  }
+});
+$('#user-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  ['new-username-error', 'new-display-name-error', 'new-password-error', 'new-user-role-error'].forEach(id => $(`#${id}`).textContent = '');
+  try {
+    await request('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ username: $('#new-username').value.trim(), displayName: $('#new-display-name').value.trim(), password: $('#new-password').value, role: $('#new-user-role').value }) });
+    event.target.reset(); await renderUsers(); toast('账号已创建');
+  } catch (error) {
+    if (error.fields) {
+      if (error.fields.username) $('#new-username-error').textContent = error.fields.username;
+      if (error.fields.displayName) $('#new-display-name-error').textContent = error.fields.displayName;
+      if (error.fields.password) $('#new-password-error').textContent = error.fields.password;
+      if (error.fields.role) $('#new-user-role-error').textContent = error.fields.role;
+    } else toast(error.message);
+  }
+});
+$('#logout-button').addEventListener('click', async () => {
+  try {
+    const keepRemembered = localStorage.getItem('devops-station-remember-session') === 'true';
+    await request('/api/auth/logout', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ keepRemembered }) });
+    window.location.replace('/login.html');
+  }
+  catch (error) { toast(error.message); }
+});
+document.addEventListener('click', event => {
+  const inputId = event.target.dataset.passwordToggle;
+  if (!inputId) return;
+  const input = document.getElementById(inputId);
+  input.type = input.type === 'password' ? 'text' : 'password';
+  event.target.textContent = input.type === 'password' ? '显示' : '隐藏';
+});
 document.addEventListener('click', async event => {
+  const accountTab = event.target.dataset.accountTab;
+  if (accountTab) { setAccountTab(accountTab); return; }
   const task = event.target.dataset.run;
   const closeId = event.target.dataset.closeAlert;
   const acknowledgeId = event.target.dataset.acknowledge;
@@ -217,9 +313,15 @@ document.addEventListener('click', async event => {
   const deleteAssetId = event.target.dataset.deleteAsset;
   const detailAssetId = event.target.dataset.detailAsset;
   const checkDetailId = event.target.dataset.checkDetail;
+  const deleteUserId = event.target.dataset.deleteUser;
   if (task) return runCheck(task);
   if (event.target.dataset.runCustom) return runCustomCheck(event.target.dataset.runCustom);
   if (checkDetailId) return showCheckDetail(Number(checkDetailId));
+  if (deleteUserId) {
+    if (!window.confirm('确定删除该账号吗？')) return;
+    try { await request(`/api/users/${deleteUserId}`, { method: 'DELETE' }); await renderUsers(); toast('账号已删除'); } catch (error) { toast(error.message); }
+    return;
+  }
   if (detailAssetId) return showAssetDetail(Number(detailAssetId));
   if (editAssetId) return beginEditAsset(Number(editAssetId));
   if (deleteAssetId) {
@@ -257,4 +359,4 @@ $('#run-host-check').addEventListener('click', () => {
 });
 
 function updateClock() { $('#clock').textContent = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date()) + ' CST'; }
-updateClock(); window.setInterval(updateClock, 1000); refreshDashboard();
+updateClock(); window.setInterval(updateClock, 1000); loadCurrentUser().then(refreshDashboard).catch(error => toast(error.message));

@@ -59,6 +59,24 @@ db.exec(`
     captured_at TEXT NOT NULL,
     FOREIGN KEY(asset_id) REFERENCES assets(id)
   );
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    display_name TEXT NOT NULL,
+    role TEXT NOT NULL DEFAULT 'operator',
+    password_salt TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_login_at TEXT
+  );
+  CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY,
+    token_hash TEXT NOT NULL UNIQUE,
+    user_id INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY(user_id) REFERENCES users(id)
+  );
 `);
 
 // Keep existing local databases compatible when new features are added.
@@ -75,6 +93,7 @@ try { db.exec("ALTER TABLE check_tasks ADD COLUMN ssh_platform TEXT NOT NULL DEF
 try { db.exec('ALTER TABLE assets ADD COLUMN cpu_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
 try { db.exec('ALTER TABLE assets ADD COLUMN memory_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
 try { db.exec('ALTER TABLE assets ADD COLUMN disk_threshold REAL NOT NULL DEFAULT 80'); } catch (_) {}
+try { db.exec('ALTER TABLE sessions ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
 
 const count = db.prepare('SELECT COUNT(*) AS total FROM assets').get().total;
 if (count === 0) {
