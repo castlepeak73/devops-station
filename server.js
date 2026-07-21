@@ -69,6 +69,14 @@ function evaluateThresholds(assetId, metrics) {
   findings.forEach(([title, detail]) => createThresholdAlert(assetId, title, detail));
   if (findings.length) db.prepare("UPDATE assets SET status = '告警', last_check = ? WHERE id = ?").run('刚刚', assetId);
   else db.prepare("UPDATE assets SET status = '正常', last_check = ? WHERE id = ? AND status <> '注意'").run('刚刚', assetId);
+  return findings;
+}
+
+function assetHealthStatus(assetId) {
+  if (!assetId) return '正常';
+  const asset = db.prepare('SELECT name FROM assets WHERE id = ?').get(assetId);
+  if (!asset) return '正常';
+  return db.prepare("SELECT COUNT(*) AS total FROM alerts WHERE asset = ? AND status = 'open'").get(asset.name).total > 0 ? '异常' : '正常';
 }
 
 function collectLocalWindowsMetrics() {
@@ -157,6 +165,7 @@ async function executeHostCheck(task) {
       .run(task.asset_id, task.connection_type, metrics.cpu, metrics.memoryUsage, metrics.memoryTotal, metrics.memoryUsed, JSON.stringify(metrics.disks || []), metrics.uptime || '', now());
     evaluateThresholds(task.asset_id, metrics);
   }
+  outcome.healthStatus = assetHealthStatus(task.asset_id);
   return outcome;
 }
 
@@ -217,13 +226,62 @@ async function executeTask(task) {
   return executeHostCheck(task);
 }
 
+let scheduledRunsInProgress = false;
+async function runDueScheduledTasks() {
+  if (scheduledRunsInProgress) return;
+  scheduledRunsInProgress = true;
+  try {
+    const timestamp = Date.now();
+    const current = new Date();
+    const dateKey = `${current.getFullYear()}-${String(current.getMonth() + 1).padStart(2, '0')}-${String(current.getDate()).padStart(2, '0')}`;
+    const timeKey = `${String(current.getHours()).padStart(2, '0')}:${String(current.getMinutes()).padStart(2, '0')}`;
+    const dueTasks = db.prepare('SELECT * FROM check_tasks WHERE schedule_enabled = 1').all().filter(task => {
+      if (task.schedule_mode === 'daily') return task.schedule_time === timeKey && task.last_scheduled_date !== dateKey;
+      return Number(task.schedule_interval_minutes) >= 5 && (!task.last_scheduled_at_ms || task.last_scheduled_at_ms + task.schedule_interval_minutes * 60000 <= timestamp);
+    });
+    for (const task of dueTasks) {
+      // Mark before collecting so a long SSH probe cannot be started twice by the scheduler.
+      db.prepare('UPDATE check_tasks SET last_scheduled_at_ms = ?, last_scheduled_date = ? WHERE id = ?').run(timestamp, dateKey, task.id);
+      const outcome = await executeTask(task);
+      const executionStatus = outcome.result === '异常' ? '失败' : '成功';
+      const healthStatus = outcome.healthStatus || assetHealthStatus(task.asset_id);
+      db.prepare('INSERT INTO check_runs (task_id, asset_id, task_name, scope, result, execution_status, health_status, executed_at, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(task.id, task.asset_id || null, task.name, `${task.target}${task.port ? `:${task.port}` : ''}`, outcome.result, executionStatus, healthStatus, now(), outcome.details);
+      db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)')
+        .run('系统定时任务', `定时执行了巡检任务 ${task.name}`, now());
+    }
+  } finally { scheduledRunsInProgress = false; }
+}
+
 function dashboard() {
+  const dayStart = new Date(); dayStart.setHours(0, 0, 0, 0);
+  const dayEnd = dayStart.getTime() + 24 * 60 * 60 * 1000;
+  const assetSummary = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN status = '正常' THEN 1 ELSE 0 END) AS healthy FROM assets").get();
+  const alertSummary = db.prepare("SELECT COUNT(*) AS total FROM alerts WHERE status = 'open'").get();
+  const checkSummary = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN result = '成功' THEN 1 ELSE 0 END) AS successful FROM check_runs WHERE executed_at_ms >= ? AND executed_at_ms < ?").get(dayStart.getTime(), dayEnd);
+  const assetTotal = assetSummary.total || 0;
+  const healthyAssets = assetSummary.healthy || 0;
+  const todayChecks = checkSummary.total || 0;
+  const successfulChecks = checkSummary.successful || 0;
   return {
+    summary: {
+      assetTotal,
+      healthyAssets,
+      healthRate: assetTotal ? Number((healthyAssets / assetTotal * 100).toFixed(1)) : 0,
+      openAlerts: alertSummary.total || 0,
+      todayChecks,
+      checkSuccessRate: todayChecks ? Number((successfulChecks / todayChecks * 100).toFixed(1)) : 0
+    },
     assets: db.prepare('SELECT id, name, ip, environment AS env, type, owner, status, last_check AS "check", service, cpu_threshold AS cpuThreshold, memory_threshold AS memoryThreshold, disk_threshold AS diskThreshold FROM assets ORDER BY id').all(),
     alerts: db.prepare("SELECT id, level, title, detail, asset, acknowledged, created_at AS time FROM alerts WHERE status = 'open' ORDER BY id").all(),
-    records: db.prepare('SELECT id, task_id AS taskId, task_name AS name, scope, result, details, executed_at AS time FROM check_runs ORDER BY id DESC LIMIT 20').all(),
+    records: db.prepare(`SELECT cr.id, cr.task_id AS taskId, cr.task_name AS name, cr.scope, cr.result,
+      cr.execution_status AS executionStatus,
+      CASE WHEN cr.asset_id IS NOT NULL AND EXISTS (SELECT 1 FROM alerts al WHERE al.asset = a.name AND al.status = 'open') THEN '异常' ELSE COALESCE(cr.health_status, '正常') END AS healthStatus,
+      cr.details, cr.executed_at AS time
+      FROM check_runs cr LEFT JOIN assets a ON a.id = cr.asset_id
+      ORDER BY cr.id DESC LIMIT 20`).all(),
     audit: db.prepare('SELECT audit_logs.actor, audit_logs.action, audit_logs.created_at AS time, users.username AS actorUsername FROM audit_logs LEFT JOIN users ON users.display_name = audit_logs.actor ORDER BY audit_logs.id DESC LIMIT 10').all()
-    , tasks: db.prepare('SELECT id, name, kind, target, port, request_path AS requestPath, asset_id AS assetId, connection_type AS connectionType, ssh_platform AS sshPlatform FROM check_tasks ORDER BY id DESC').all()
+    , tasks: db.prepare("SELECT id, name, kind, target, port, request_path AS requestPath, asset_id AS assetId, connection_type AS connectionType, ssh_platform AS sshPlatform, schedule_enabled AS scheduleEnabled, schedule_interval_minutes AS scheduleIntervalMinutes, schedule_mode AS scheduleMode, schedule_time AS scheduleTime FROM check_tasks ORDER BY id DESC").all()
   };
 }
 
@@ -346,6 +404,28 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, { ok: true });
     }
     if (req.method === 'GET' && url.pathname === '/api/dashboard') return sendJson(res, 200, dashboard());
+    if (req.method === 'GET' && url.pathname === '/api/check-runs') {
+      const pageSize = 6;
+      const total = db.prepare('SELECT COUNT(*) AS total FROM check_runs').get().total;
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const page = Math.min(Math.max(1, Number(url.searchParams.get('page')) || 1), totalPages);
+      const runs = db.prepare(`SELECT cr.id, cr.task_id AS taskId, cr.task_name AS name, cr.scope, cr.result,
+        cr.execution_status AS executionStatus,
+        CASE WHEN cr.asset_id IS NOT NULL AND EXISTS (SELECT 1 FROM alerts al WHERE al.asset = a.name AND al.status = 'open') THEN '异常' ELSE COALESCE(cr.health_status, '正常') END AS healthStatus,
+        cr.details, cr.executed_at AS time
+        FROM check_runs cr LEFT JOIN assets a ON a.id = cr.asset_id
+        ORDER BY cr.id DESC LIMIT ? OFFSET ?`).all(pageSize, (page - 1) * pageSize);
+      return sendJson(res, 200, { records: runs, page, pageSize, total, totalPages });
+    }
+    if (req.method === 'GET' && url.pathname === '/api/check-tasks') {
+      const pageSize = 6;
+      const total = db.prepare('SELECT COUNT(*) AS total FROM check_tasks').get().total;
+      const totalPages = Math.max(1, Math.ceil(total / pageSize));
+      const page = Math.min(Math.max(1, Number(url.searchParams.get('page')) || 1), totalPages);
+      const tasks = db.prepare("SELECT id, name, kind, target, port, request_path AS requestPath, asset_id AS assetId, connection_type AS connectionType, ssh_platform AS sshPlatform, schedule_enabled AS scheduleEnabled, schedule_interval_minutes AS scheduleIntervalMinutes, schedule_mode AS scheduleMode, schedule_time AS scheduleTime FROM check_tasks ORDER BY id DESC LIMIT ? OFFSET ?")
+        .all(pageSize, (page - 1) * pageSize);
+      return sendJson(res, 200, { tasks, page, pageSize, total, totalPages });
+    }
     const metricsMatch = url.pathname.match(/^\/api\/assets\/(\d+)\/metrics$/);
     if (metricsMatch && req.method === 'GET') {
       const asset = db.prepare('SELECT id, name, ip, environment AS env, type, owner, status, last_check AS "check", service, cpu_threshold AS cpuThreshold, memory_threshold AS memoryThreshold, disk_threshold AS diskThreshold FROM assets WHERE id = ?').get(Number(metricsMatch[1]));
@@ -356,7 +436,11 @@ const server = http.createServer(async (req, res) => {
     }
     const runMatch = url.pathname.match(/^\/api\/check-runs\/(\d+)$/);
     if (runMatch && req.method === 'GET') {
-      const run = db.prepare('SELECT id, task_id AS taskId, task_name AS name, scope, result, details, executed_at AS time FROM check_runs WHERE id = ?').get(Number(runMatch[1]));
+      const run = db.prepare(`SELECT cr.id, cr.task_id AS taskId, cr.task_name AS name, cr.scope, cr.result,
+        cr.execution_status AS executionStatus,
+        CASE WHEN cr.asset_id IS NOT NULL AND EXISTS (SELECT 1 FROM alerts al WHERE al.asset = a.name AND al.status = 'open') THEN '异常' ELSE COALESCE(cr.health_status, '正常') END AS healthStatus,
+        cr.details, cr.executed_at AS time
+        FROM check_runs cr LEFT JOIN assets a ON a.id = cr.asset_id WHERE cr.id = ?`).get(Number(runMatch[1]));
       if (!run) return sendJson(res, 404, { error: '未找到执行记录' });
       const task = run.taskId ? db.prepare('SELECT kind, target, port, request_path AS requestPath, asset_id AS assetId, connection_type AS connectionType FROM check_tasks WHERE id = ?').get(run.taskId) : null;
       const metrics = task?.assetId ? db.prepare('SELECT cpu_usage AS cpuUsage, memory_usage AS memoryUsage, memory_total AS memoryTotal, memory_used AS memoryUsed, disk_json AS diskJson, uptime, captured_at AS capturedAt FROM host_metrics WHERE asset_id = ? ORDER BY id DESC LIMIT 1').get(task.assetId) : null;
@@ -392,25 +476,60 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, dashboard());
     }
     if (req.method === 'POST' && url.pathname === '/api/check-tasks') {
-      const { name, kind, target, port, requestPath, assetId, connectionType, sshPort, sshUsername, sshKeyPath, sshPlatform } = await readBody(req);
+      const { name, kind, target, port, requestPath, assetId, connectionType, sshPort, sshUsername, sshKeyPath, sshPlatform, scheduleEnabled, scheduleIntervalMinutes, scheduleMode, scheduleTime } = await readBody(req);
       const allowed = ['ping', 'tcp', 'http', 'https', 'tls', 'host']; const validPort = Number(port || (kind === 'http' ? 80 : 443));
       const asset = assetId ? db.prepare('SELECT id, ip FROM assets WHERE id = ?').get(Number(assetId)) : null;
       if (!name?.trim() || !allowed.includes(kind) || !isIpv4(target) || (kind !== 'ping' && kind !== 'host' && (!Number.isInteger(validPort) || validPort < 1 || validPort > 65535))) return sendJson(res, 422, { error: '请填写有效的任务名称、目标 IPv4 地址和端口' });
       if (kind === 'host' && (!asset || asset.ip !== target || !['local', 'ssh'].includes(connectionType))) return sendJson(res, 422, { error: '主机健康巡检必须选择已登记资产，并使用其对应 IP 地址' });
       const platform = ['windows', 'macos', 'linux'].includes(sshPlatform) ? sshPlatform : 'linux';
-      const result = db.prepare('INSERT INTO check_tasks (name, kind, target, port, request_path, created_at, asset_id, connection_type, ssh_port, ssh_username, ssh_key_path, ssh_platform) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-        .run(name.trim(), kind, target, kind === 'ping' || kind === 'host' ? null : validPort, requestPath || '/', now(), asset?.id || null, connectionType || null, sshPort || null, sshUsername || null, sshKeyPath || null, platform);
+      const interval = Number(scheduleIntervalMinutes);
+      const scheduled = Boolean(scheduleEnabled);
+      const mode = scheduleMode === 'daily' ? 'daily' : 'interval';
+      const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(scheduleTime || '')) ? String(scheduleTime) : null;
+      if (scheduled && mode === 'interval' && (!Number.isInteger(interval) || interval < 5 || interval > 1440)) return sendJson(res, 422, { error: '定时巡检间隔必须在 5 到 1440 分钟之间' });
+      if (scheduled && mode === 'daily' && !time) return sendJson(res, 422, { error: '请设置每天执行的具体时间' });
+      const result = db.prepare('INSERT INTO check_tasks (name, kind, target, port, request_path, created_at, asset_id, connection_type, ssh_port, ssh_username, ssh_key_path, ssh_platform, schedule_enabled, schedule_interval_minutes, schedule_mode, schedule_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+        .run(name.trim(), kind, target, kind === 'ping' || kind === 'host' ? null : validPort, requestPath || '/', now(), asset?.id || null, connectionType || null, sshPort || null, sshUsername || null, sshKeyPath || null, platform, scheduled ? 1 : 0, scheduled && mode === 'interval' ? interval : null, mode, scheduled && mode === 'daily' ? time : null);
+      if (scheduled && mode === 'interval') db.prepare('UPDATE check_tasks SET last_scheduled_at_ms = ? WHERE id = ?').run(Date.now(), result.lastInsertRowid);
       insertAudit(`创建了巡检任务 ${name.trim()}`); return sendJson(res, 201, { taskId: result.lastInsertRowid, ...dashboard() });
     }
     const taskRunMatch = url.pathname.match(/^\/api\/check-tasks\/(\d+)\/run$/);
     if (taskRunMatch && req.method === 'POST') {
       const task = db.prepare('SELECT * FROM check_tasks WHERE id = ?').get(Number(taskRunMatch[1])); if (!task) return sendJson(res, 404, { error: '未找到巡检任务' });
-      const outcome = await executeTask(task); db.prepare('INSERT INTO check_runs (task_id, asset_id, task_name, scope, result, executed_at, details) VALUES (?, ?, ?, ?, ?, ?, ?)').run(task.id, task.asset_id || null, task.name, `${task.target}${task.port ? `:${task.port}` : ''}`, outcome.result, now(), outcome.details);
+      const outcome = await executeTask(task);
+      // A completed probe can still report a closed service port. That is a check finding,
+      // not a failure of the inspection runner itself.
+      const executionStatus = outcome.result === '异常' ? '失败' : '成功';
+      const healthStatus = outcome.healthStatus || assetHealthStatus(task.asset_id);
+      outcome.executionStatus = executionStatus; outcome.healthStatus = healthStatus;
+      db.prepare('INSERT INTO check_runs (task_id, asset_id, task_name, scope, result, execution_status, health_status, executed_at, details) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)').run(task.id, task.asset_id || null, task.name, `${task.target}${task.port ? `:${task.port}` : ''}`, outcome.result, executionStatus, healthStatus, now(), outcome.details);
       insertAudit(`执行了巡检任务 ${task.name}：${outcome.result}`); return sendJson(res, 200, { outcome, ...dashboard() });
+    }
+    const taskScheduleMatch = url.pathname.match(/^\/api\/check-tasks\/(\d+)\/schedule$/);
+    if (taskScheduleMatch && req.method === 'PUT') {
+      const { enabled, intervalMinutes, mode: requestedMode, time: requestedTime } = await readBody(req);
+      const interval = Number(intervalMinutes);
+      const mode = requestedMode === 'daily' ? 'daily' : 'interval';
+      const time = /^([01]\d|2[0-3]):[0-5]\d$/.test(String(requestedTime || '')) ? String(requestedTime) : null;
+      if (enabled && mode === 'interval' && (!Number.isInteger(interval) || interval < 5 || interval > 1440)) return sendJson(res, 422, { error: '定时巡检间隔必须在 5 到 1440 分钟之间' });
+      if (enabled && mode === 'daily' && !time) return sendJson(res, 422, { error: '请设置每天执行的具体时间' });
+      const updated = db.prepare('UPDATE check_tasks SET schedule_enabled = ?, schedule_interval_minutes = ?, schedule_mode = ?, schedule_time = ?, last_scheduled_at_ms = ?, last_scheduled_date = NULL WHERE id = ?')
+        .run(enabled ? 1 : 0, enabled && mode === 'interval' ? interval : null, mode, enabled && mode === 'daily' ? time : null, enabled && mode === 'interval' ? Date.now() : null, Number(taskScheduleMatch[1]));
+      if (!updated.changes) return sendJson(res, 404, { error: '未找到巡检任务' });
+      insertAudit(`更新了巡检任务定时设置`);
+      return sendJson(res, 200, dashboard());
+    }
+    const taskDeleteMatch = url.pathname.match(/^\/api\/check-tasks\/(\d+)$/);
+    if (taskDeleteMatch && req.method === 'DELETE') {
+      const task = db.prepare('SELECT name FROM check_tasks WHERE id = ?').get(Number(taskDeleteMatch[1]));
+      if (!task) return sendJson(res, 404, { error: '未找到巡检任务' });
+      db.prepare('DELETE FROM check_tasks WHERE id = ?').run(Number(taskDeleteMatch[1]));
+      insertAudit(`删除了巡检任务 ${task.name}`);
+      return sendJson(res, 200, dashboard());
     }
     if (req.method === 'POST' && url.pathname === '/api/checks/run') {
       const { taskName = '全量巡检' } = await readBody(req);
-      db.prepare('INSERT INTO check_runs (task_name, scope, result, executed_at) VALUES (?, ?, ?, ?)').run(taskName, '生产环境 · 自动检测', '成功', now());
+      db.prepare('INSERT INTO check_runs (task_name, scope, result, execution_status, health_status, executed_at) VALUES (?, ?, ?, ?, ?, ?)').run(taskName, '生产环境 · 自动检测', '成功', '成功', '正常', now());
       db.prepare('INSERT INTO audit_logs (actor, action, created_at) VALUES (?, ?, ?)').run('陈宇', `执行了「${taskName}」`, now());
       return sendJson(res, 201, dashboard());
     }
@@ -443,4 +562,8 @@ const server = http.createServer(async (req, res) => {
   } catch (error) { sendJson(res, 400, { error: error.message }); }
 });
 
-server.listen(port, () => console.log(`运维检测台运行在 http://localhost:${port}`));
+server.listen(port, () => {
+  console.log(`运维检测台运行在 http://localhost:${port}`);
+  runDueScheduledTasks().catch(error => console.error('Scheduled inspection failed:', error.message));
+  setInterval(() => runDueScheduledTasks().catch(error => console.error('Scheduled inspection failed:', error.message)), 30 * 1000);
+});

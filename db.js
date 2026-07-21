@@ -100,6 +100,15 @@ try { db.exec('ALTER TABLE alerts ADD COLUMN acknowledged_at TEXT'); } catch (_)
 try { db.exec('ALTER TABLE alerts ADD COLUMN closed_by TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE alerts ADD COLUMN closed_at TEXT'); } catch (_) {}
 try { db.exec('ALTER TABLE alerts ADD COLUMN created_at_ms INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE check_runs ADD COLUMN executed_at_ms INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE check_runs ADD COLUMN execution_status TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE check_runs ADD COLUMN health_status TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN schedule_enabled INTEGER NOT NULL DEFAULT 0'); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN schedule_interval_minutes INTEGER'); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN last_scheduled_at_ms INTEGER'); } catch (_) {}
+try { db.exec("ALTER TABLE check_tasks ADD COLUMN schedule_mode TEXT NOT NULL DEFAULT 'interval'"); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN schedule_time TEXT'); } catch (_) {}
+try { db.exec('ALTER TABLE check_tasks ADD COLUMN last_scheduled_date TEXT'); } catch (_) {}
 db.exec(`CREATE TRIGGER IF NOT EXISTS audit_logs_set_created_at_ms
   AFTER INSERT ON audit_logs WHEN NEW.created_at_ms IS NULL
   BEGIN UPDATE audit_logs SET created_at_ms = CAST(strftime('%s', 'now') AS INTEGER) * 1000 WHERE id = NEW.id; END;`);
@@ -126,6 +135,20 @@ if (alertTimestampCount <= 1) {
     const match = String(row.created_at).match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
     const timestamp = match ? today.getTime() + (Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3] || 0)) * 1000 : Date.now();
     updateAlertTimestamp.run(timestamp, row.id);
+  }))();
+}
+db.exec(`CREATE TRIGGER IF NOT EXISTS check_runs_set_executed_at_ms
+  AFTER INSERT ON check_runs WHEN NEW.executed_at_ms IS NULL
+  BEGIN UPDATE check_runs SET executed_at_ms = CAST(strftime('%s', 'now') AS INTEGER) * 1000 WHERE id = NEW.id; END;`);
+db.prepare('UPDATE check_runs SET executed_at_ms = ? WHERE executed_at_ms IS NULL').run(Date.now());
+const checkTimestampCount = db.prepare('SELECT COUNT(DISTINCT executed_at_ms) AS total FROM check_runs').get().total;
+if (checkTimestampCount <= 1) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const updateCheckTimestamp = db.prepare('UPDATE check_runs SET executed_at_ms = ? WHERE id = ?');
+  db.transaction(() => db.prepare('SELECT id, executed_at FROM check_runs').all().forEach(row => {
+    const match = String(row.executed_at).match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?/);
+    const timestamp = match ? today.getTime() + (Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3] || 0)) * 1000 : Date.now();
+    updateCheckTimestamp.run(timestamp, row.id);
   }))();
 }
 

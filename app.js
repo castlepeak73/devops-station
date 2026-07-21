@@ -8,6 +8,8 @@ let filters = { query: '', environment: '', status: '', alertLevel: '', auditQue
 let auditPagination = { page: 1, total: 0, totalPages: 1, pageSize: 10, from: '', to: '' };
 let alertHistory = [];
 let alertHistoryPagination = { page: 1, total: 0, totalPages: 1, pageSize: 10, query: '', status: '', from: '', to: '' };
+let checkPagination = { page: 1, total: 0, totalPages: 1, pageSize: 6 };
+let taskPagination = { page: 1, total: 0, totalPages: 1, pageSize: 6 };
 
 const tasks = [
   ['◌', '主机连通性检测', '验证目标主机网络连通与延迟'],
@@ -77,9 +79,26 @@ async function openUserManagement() {
 
 function applyPermissions() {
   const readOnly = currentUser?.role === 'viewer';
-  ['#add-asset', '#new-check', '#run-all', '#run-host-check'].forEach(selector => { const element = $(selector); if (element) element.hidden = readOnly; });
-  document.querySelectorAll('.run').forEach(button => button.hidden = readOnly);
+  ['#add-asset', '#new-check', '#run-host-check'].forEach(selector => { const element = $(selector); if (element) element.hidden = readOnly; });
+  document.querySelectorAll('.run, .task-delete, .task-schedule').forEach(button => button.hidden = readOnly);
   $('#threshold-form').querySelectorAll('input, button').forEach(element => element.disabled = readOnly);
+}
+
+function renderOverview(summary = {}) {
+  const assetTotal = Number(summary.assetTotal || 0);
+  const healthyAssets = Number(summary.healthyAssets || 0);
+  const openAlerts = Number(summary.openAlerts || 0);
+  const todayChecks = Number(summary.todayChecks || 0);
+  const name = currentUser?.displayName || '你';
+  $('#asset-total').textContent = assetTotal;
+  $('#healthy-assets').textContent = healthyAssets;
+  $('#healthy-asset-total').textContent = assetTotal;
+  $('#health-rate').textContent = `${Number(summary.healthRate || 0)}%`;
+  $('#alert-count').textContent = openAlerts;
+  $('#alert-summary-text').textContent = openAlerts ? '当前待处理告警' : '当前没有待处理告警';
+  $('#today-checks').textContent = todayChecks;
+  $('#check-success-rate').textContent = `${Number(summary.checkSuccessRate || 0)}%`;
+  $('#overview-greeting').textContent = openAlerts ? `你好，${name}。当前有 ${openAlerts} 条告警待处理。` : `你好，${name}。当前没有待处理告警。`;
 }
 
 function filteredAssets() {
@@ -113,6 +132,24 @@ function renderAlerts() {
   $('#alert-count').textContent = alerts.length;
   $('#all-alert-count').textContent = alerts.length;
   $('#sidebar-alert-count').textContent = alerts.length;
+  updateAlertUnreadState();
+}
+
+function alertReadKey() { return `devops-station-alert-seen-${currentUser?.username || 'anonymous'}`; }
+function updateAlertUnreadState() {
+  const latestId = alerts.reduce((latest, alert) => Math.max(latest, Number(alert.id) || 0), 0);
+  const seenId = Number(localStorage.getItem(alertReadKey()) || 0);
+  const unread = latestId > seenId;
+  const badge = $('#sidebar-alert-count');
+  badge.classList.toggle('danger', unread);
+  badge.classList.toggle('unread', unread);
+  $('#notifications').querySelector('em').hidden = !unread;
+}
+
+function markAlertsRead() {
+  const latestId = alerts.reduce((latest, alert) => Math.max(latest, Number(alert.id) || 0), 0);
+  localStorage.setItem(alertReadKey(), String(latestId));
+  updateAlertUnreadState();
 }
 
 function renderSidebarCounts() {
@@ -133,6 +170,37 @@ function renderChecks() {
     <div class="execution-item"><span class="check-status">${record.result === '成功' ? '✓' : record.result === '无监听' ? '−' : '!'}</span><div><b>${record.name}</b><p>${record.scope}</p><time>${record.time}</time></div><span class="badge ${record.result === '成功' ? 'ok' : 'warn'}">${record.result}</span>${record.id ? `<button class="text-button" data-check-detail="${record.id}">查看</button>` : ''}</div>`).join('');
   $('#custom-task-list').innerHTML = customTasks.length ? customTasks.map(task => `
     <div class="check-card"><span class="task-icon">${task.kind === 'ping' ? '◌' : task.kind === 'tcp' ? '▤' : '⌁'}</span><div><b>${task.name}</b><p>${task.kind.toUpperCase()} · ${task.target}${task.port ? `:${task.port}` : ''}${task.requestPath && task.kind !== 'ping' ? task.requestPath : ''}</p></div><button class="run" data-run-custom="${task.id}">运行</button></div>`).join('') : '<div class="empty">尚未创建自定义巡检任务。</div>';
+}
+
+function renderChecks() {
+  const executionLabel = record => record.executionStatus || (record.result === '异常' ? '失败' : '成功');
+  const healthLabel = record => record.healthStatus || '正常';
+  const taskKindLabel = kind => ({ host: '整机健康', ping: '主机连通', tcp: 'TCP 端口', http: 'HTTP 服务', https: 'HTTPS 服务', tls: 'TLS 证书' }[kind] || String(kind).toUpperCase());
+  $('#recent-checks').innerHTML = records.slice(0, 3).map(record => {
+    const execution = executionLabel(record);
+    return `<div class="recent-item"><span class="check-status">${execution === '成功' ? '✓' : '!'}</span><div><b>${record.name}</b><small>${record.scope}</small></div><time>${record.time}</time>${record.id ? `<button class="text-button" data-check-detail="${record.id}">详情</button>` : ''}</div>`;
+  }).join('');
+  $('#task-total').textContent = `${taskPagination.total} 个任务`;
+  $('#custom-task-list').innerHTML = customTasks.length ? customTasks.map(task => {
+    const target = `${task.target}${task.port ? `:${task.port}` : ''}`;
+    const icon = task.kind === 'host' ? '◉' : task.kind === 'ping' ? '⌁' : task.kind === 'tcp' ? '⇄' : task.kind === 'tls' ? '◇' : '⌘';
+    const schedule = task.scheduleEnabled ? (task.scheduleMode === 'daily' ? `每天 ${task.scheduleTime}` : `每 ${task.scheduleIntervalMinutes} 分钟`) : '手动执行';
+    const actions = currentUser?.role === 'viewer' ? '' : `<button class="task-schedule ${task.scheduleEnabled ? 'active' : ''}" data-toggle-schedule="${task.id}" data-schedule-enabled="${task.scheduleEnabled ? '0' : '1'}" data-schedule-interval="${task.scheduleIntervalMinutes || 15}" data-schedule-mode="${task.scheduleMode || 'interval'}" data-schedule-time="${task.scheduleTime || '16:00'}">${task.scheduleEnabled ? '暂停定时' : '启用定时'}</button><button class="run task-run" data-run-custom="${task.id}">执行</button><button class="task-delete" data-delete-task="${task.id}" title="删除任务">×</button>`;
+    return `<article class="task-card"><div class="task-card-head"><span class="task-icon">${icon}</span><span class="task-kind">${taskKindLabel(task.kind)}</span></div><b>${task.name}</b><p>${target}</p><div class="task-card-footer"><span>${task.connectionType === 'ssh' ? 'SSH 采集' : task.kind === 'host' ? '本机采集' : '网络检测'}</span><span class="schedule-status ${task.scheduleEnabled ? 'enabled' : ''}">${schedule}</span><div class="task-actions">${actions}</div></div></article>`;
+  }).join('') : '<div class="empty task-empty">还没有巡检任务。创建一个任务后，它会一直保留在这里。</div>';
+  $('#execution-summary').textContent = `共 ${checkPagination.total} 条记录`;
+  $('#execution-list').innerHTML = records.length ? records.map(record => {
+    const execution = executionLabel(record); const health = healthLabel(record);
+    return `<div class="execution-item"><span class="check-status">${execution === '成功' ? '✓' : '!'}</span><div><b>${record.name}</b><p>${record.scope}</p><time>${record.time}</time></div><div class="execution-statuses"><span class="badge ${execution === '成功' ? 'ok' : 'warn'}">执行：${execution}</span><span class="badge ${health === '正常' ? 'ok' : 'warn'}">健康：${health}</span></div>${record.id ? `<button class="text-button" data-check-detail="${record.id}">查看</button>` : ''}</div>`;
+  }).join('') : '<div class="empty">暂无执行记录。</div>';
+  const start = Math.max(1, checkPagination.page - 1); const end = Math.min(checkPagination.totalPages, start + 2);
+  $('#check-page-buttons').innerHTML = Array.from({ length: end - start + 1 }, (_, index) => { const page = start + index; return `<button class="filter ${page === checkPagination.page ? 'active' : ''}" data-check-page="${page}">${page}</button>`; }).join('');
+  $('#check-prev').disabled = checkPagination.page <= 1;
+  $('#check-next').disabled = checkPagination.page >= checkPagination.totalPages;
+  const taskStart = Math.max(1, taskPagination.page - 1); const taskEnd = Math.min(taskPagination.totalPages, taskStart + 2);
+  $('#task-page-buttons').innerHTML = Array.from({ length: taskEnd - taskStart + 1 }, (_, index) => { const page = taskStart + index; return `<button class="filter ${page === taskPagination.page ? 'active' : ''}" data-task-page="${page}">${page}</button>`; }).join('');
+  $('#task-prev').disabled = taskPagination.page <= 1;
+  $('#task-next').disabled = taskPagination.page >= taskPagination.totalPages;
 }
 
 function renderAudit() {
@@ -208,17 +276,38 @@ function applyDashboard(data) {
   assets = data.assets;
   alerts = data.alerts;
   records = data.records;
+  checkPagination = { ...checkPagination, page: 1, total: records.length, totalPages: Math.max(1, Math.ceil(records.length / checkPagination.pageSize)) };
   audit = data.audit;
   auditPagination = { ...auditPagination, page: 1, total: audit.length, totalPages: 1 };
   customTasks = data.tasks || [];
+  taskPagination = { ...taskPagination, page: 1, total: customTasks.length, totalPages: Math.max(1, Math.ceil(customTasks.length / taskPagination.pageSize)) };
   $('#check-asset').innerHTML = assets.map(asset => `<option value="${asset.id}" data-ip="${asset.ip}">${asset.name} · ${asset.ip}</option>`).join('');
-  renderAssets(); renderAlerts(); renderSidebarCounts(); renderServices(); renderChecks(); renderAudit(); applyPermissions();
+  renderOverview(data.summary); renderAssets(); renderAlerts(); renderSidebarCounts(); renderServices(); renderChecks(); renderAudit(); applyPermissions();
   $('#updated-at').textContent = '刚刚';
+  if ($('#checks').classList.contains('active')) { refreshCheckRuns(); refreshCheckTasks(); }
 }
 
 async function refreshDashboard() {
   try { applyDashboard(await request('/api/dashboard')); }
   catch (error) { toast('无法连接本机服务，请先启动后端'); }
+}
+
+async function refreshCheckRuns() {
+  try {
+    const data = await request(`/api/check-runs?page=${checkPagination.page}`);
+    records = data.records;
+    checkPagination = { page: data.page, total: data.total, totalPages: data.totalPages, pageSize: data.pageSize };
+    renderChecks();
+  } catch (error) { toast(error.message); }
+}
+
+async function refreshCheckTasks() {
+  try {
+    const data = await request(`/api/check-tasks?page=${taskPagination.page}`);
+    customTasks = data.tasks;
+    taskPagination = { page: data.page, total: data.total, totalPages: data.totalPages, pageSize: data.pageSize };
+    renderChecks();
+  } catch (error) { toast(error.message); }
 }
 
 async function runCheck(taskName) {
@@ -237,6 +326,8 @@ function setView(view) {
   document.querySelectorAll('.view').forEach(section => section.classList.toggle('active', section.id === view));
   const labels = { dashboard: ['控制台', '运行总览'], assets: ['资源中心', '资产管理'], 'asset-detail': ['资源中心', '主机详情'], checks: ['作业中心', '巡检中心'], 'check-detail': ['作业中心', '巡检结果'], alerts: ['事件中心', '告警中心'], audit: ['合规中心', '审计日志'] };
   $('#page-kicker').textContent = labels[view][0]; $('#page-title').textContent = labels[view][1];
+  if (view === 'alerts') markAlertsRead();
+  if (view === 'checks') { refreshCheckRuns(); refreshCheckTasks(); }
   if (view === 'audit') refreshAuditSearch();
 }
 
@@ -267,8 +358,15 @@ $('#asset-environment-filter').addEventListener('change', event => { filters.env
 $('#asset-status-filter').addEventListener('change', event => { filters.status = event.target.value; renderAssets(); });
 $('#alert-level-filter').addEventListener('change', event => { filters.alertLevel = event.target.value; renderAlerts(); });
 $('#add-asset').addEventListener('click', () => { $('#asset-form').reset(); $('#asset-id').value = ''; $('#asset-modal-title').textContent = '添加资产'; openModal('asset-modal'); });
-$('#new-check').addEventListener('click', () => openModal('check-modal'));
-$('#run-all').addEventListener('click', () => runCheck('全量巡检'));
+function syncScheduleSettings() {
+  const enabled = $('#schedule-enabled').checked;
+  const daily = $('#schedule-mode').value === 'daily';
+  $('#schedule-mode-label').hidden = !enabled;
+  $('#schedule-interval-label').hidden = !enabled || daily;
+  $('#schedule-time-label').hidden = !enabled || !daily;
+}
+
+$('#new-check').addEventListener('click', () => { $('#check-form').reset(); syncScheduleSettings(); openModal('check-modal'); });
 
 $('#asset-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -286,8 +384,8 @@ $('#check-form').addEventListener('submit', async event => {
   event.preventDefault();
   const kind = $('#check-kind').value;
   const selectedOption = $('#check-asset').selectedOptions[0];
-  const payload = { name: $('#custom-check-name').value.trim(), target: selectedOption?.dataset.ip, kind, port: Number($('#check-port').value), requestPath: $('#check-path').value.trim() || '/', assetId: Number($('#check-asset').value), connectionType: kind === 'host' ? $('#connection-type').value : null, sshPort: Number($('#ssh-port').value), sshUsername: $('#ssh-username').value.trim(), sshKeyPath: $('#ssh-key-path').value.trim(), sshPlatform: $('#ssh-platform').value };
-  closeModal('check-modal'); event.target.reset();
+  const payload = { name: $('#custom-check-name').value.trim(), target: selectedOption?.dataset.ip, kind, port: Number($('#check-port').value), requestPath: $('#check-path').value.trim() || '/', assetId: Number($('#check-asset').value), connectionType: kind === 'host' ? $('#connection-type').value : null, sshPort: Number($('#ssh-port').value), sshUsername: $('#ssh-username').value.trim(), sshKeyPath: $('#ssh-key-path').value.trim(), sshPlatform: $('#ssh-platform').value, scheduleEnabled: $('#schedule-enabled').checked, scheduleMode: $('#schedule-mode').value, scheduleIntervalMinutes: Number($('#schedule-interval').value), scheduleTime: $('#schedule-time').value };
+  closeModal('check-modal'); event.target.reset(); syncScheduleSettings();
   try {
     const data = await request('/api/check-tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
     applyDashboard(data); toast('巡检任务已创建，正在执行');
@@ -400,13 +498,33 @@ document.addEventListener('click', async event => {
   const deleteAssetId = event.target.dataset.deleteAsset;
   const detailAssetId = event.target.dataset.detailAsset;
   const checkDetailId = event.target.dataset.checkDetail;
+  const deleteTaskId = event.target.dataset.deleteTask;
+  const toggleScheduleId = event.target.dataset.toggleSchedule;
+  const checkPage = Number(event.target.dataset.checkPage);
+  const taskPage = Number(event.target.dataset.taskPage);
   const deleteUserId = event.target.dataset.deleteUser;
   const auditPage = Number(event.target.dataset.auditPage);
   const historyPage = Number(event.target.dataset.historyPage);
   if (task) return runCheck(task);
+  if (checkPage) { checkPagination.page = checkPage; return refreshCheckRuns(); }
+  if (taskPage) { taskPagination.page = taskPage; return refreshCheckTasks(); }
   if (auditPage) { auditPagination.page = auditPage; return refreshAuditSearch(); }
   if (historyPage) { alertHistoryPagination.page = historyPage; return refreshAlertHistory(); }
   if (event.target.dataset.runCustom) return runCustomCheck(event.target.dataset.runCustom);
+  if (toggleScheduleId) {
+    try {
+      const enabled = event.target.dataset.scheduleEnabled === '1';
+      applyDashboard(await request(`/api/check-tasks/${toggleScheduleId}/schedule`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ enabled, intervalMinutes: Number(event.target.dataset.scheduleInterval) || 15, mode: event.target.dataset.scheduleMode || 'interval', time: event.target.dataset.scheduleTime || '16:00' }) }));
+      toast(enabled ? '已启用定时巡检' : '已暂停定时巡检');
+    } catch (error) { toast(error.message); }
+    return;
+  }
+  if (deleteTaskId) {
+    if (!window.confirm('确定删除这个巡检任务吗？已有执行记录会继续保留。')) return;
+    try { applyDashboard(await request(`/api/check-tasks/${deleteTaskId}`, { method: 'DELETE' })); toast('巡检任务已删除'); }
+    catch (error) { toast(error.message); }
+    return;
+  }
   if (checkDetailId) return showCheckDetail(Number(checkDetailId));
   if (deleteUserId) {
     if (!window.confirm('确定删除该账号吗？')) return;
@@ -435,6 +553,12 @@ $('#check-kind').addEventListener('change', event => {
 });
 
 $('#connection-type').addEventListener('change', event => { $('#ssh-fields').style.display = event.target.value === 'ssh' ? 'block' : 'none'; });
+$('#schedule-enabled').addEventListener('change', syncScheduleSettings);
+$('#schedule-mode').addEventListener('change', syncScheduleSettings);
+$('#check-prev').addEventListener('click', () => { if (checkPagination.page > 1) { checkPagination.page -= 1; refreshCheckRuns(); } });
+$('#check-next').addEventListener('click', () => { if (checkPagination.page < checkPagination.totalPages) { checkPagination.page += 1; refreshCheckRuns(); } });
+$('#task-prev').addEventListener('click', () => { if (taskPagination.page > 1) { taskPagination.page -= 1; refreshCheckTasks(); } });
+$('#task-next').addEventListener('click', () => { if (taskPagination.page < taskPagination.totalPages) { taskPagination.page += 1; refreshCheckTasks(); } });
 $('#threshold-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (!selectedAssetId) return;
@@ -446,8 +570,31 @@ $('#back-to-assets').addEventListener('click', () => setView('assets'));
 $('#back-to-checks').addEventListener('click', () => setView('checks'));
 $('#run-host-check').addEventListener('click', () => {
   const asset = assets.find(item => item.id === selectedAssetId); if (!asset) return;
-  $('#check-form').reset(); $('#check-kind').value = 'host'; $('#check-asset').value = String(asset.id); $('#custom-check-name').value = `${asset.name} 整机健康检查`; $('#check-kind').dispatchEvent(new Event('change')); openModal('check-modal');
+  $('#check-form').reset(); syncScheduleSettings(); $('#check-kind').value = 'host'; $('#check-asset').value = String(asset.id); $('#custom-check-name').value = `${asset.name} 整机健康检查`; $('#check-kind').dispatchEvent(new Event('change')); openModal('check-modal');
 });
+
+async function showCheckDetail(id) {
+  try {
+    const data = await request(`/api/check-runs/${id}`);
+    const { run, task, metrics } = data;
+    const execution = run.executionStatus || (run.result === '\u5f02\u5e38' ? '\u5931\u8d25' : '\u6210\u529f');
+    const health = run.healthStatus || '\u6b63\u5e38';
+    $('#check-detail-name').textContent = run.name;
+    $('#check-detail-meta').textContent = `${run.scope} | ${run.time}${task ? ` | ${task.kind.toUpperCase()}` : ''}`;
+    const status = $('#check-detail-status');
+    status.textContent = `\u6267\u884c\uff1a${execution} | \u5065\u5eb7\uff1a${health}`;
+    status.className = `badge ${execution === '\u6210\u529f' && health === '\u6b63\u5e38' ? 'ok' : 'warn'}`;
+    $('#check-detail-metrics').innerHTML = metrics ? [
+      ['CPU', `${metrics.cpuUsage ?? '-'}%`, '\u672c\u6b21\u91c7\u96c6'],
+      ['\u5185\u5b58', `${metrics.memoryUsage ?? '-'}%`, `${metrics.memoryUsed ?? '-'} / ${metrics.memoryTotal ?? '-'} MB`],
+      ['\u8fd0\u884c\u65f6\u95f4', metrics.uptime || '-', '\u672c\u6b21\u91c7\u96c6'],
+      ['\u78c1\u76d8\u6570\u91cf', `${metrics.disks?.length || 0}`, '\u5df2\u91c7\u96c6\u5206\u533a']
+    ].map(item => `<article class="metric"><div class="metric-label">${item[0]}</div><strong>${item[1]}</strong><p>${item[2]}</p></article>`).join('') : '';
+    const disks = metrics?.disks?.length ? metrics.disks.map(disk => `<div class="audit-item"><span class="audit-symbol">+</span><div><b>${disk.name}</b><p>${disk.usedGb} GB / ${disk.totalGb} GB | ${disk.usage}%</p></div></div>`).join('') : '';
+    $('#check-detail-output').innerHTML = `<div class="audit-item"><span class="audit-symbol">i</span><div><b>\u68c0\u6d4b\u7ed3\u679c</b><p>${run.details || '\u672a\u4fdd\u5b58\u989d\u5916\u8fd4\u56de\u4fe1\u606f\u3002'}</p></div><time>${run.time}</time></div>${disks}`;
+    setView('check-detail');
+  } catch (error) { toast(error.message); }
+}
 
 function updateClock() { $('#clock').textContent = new Intl.DateTimeFormat('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(new Date()) + ' CST'; }
 updateClock(); window.setInterval(updateClock, 1000); loadCurrentUser().then(refreshDashboard).catch(error => toast(error.message));
